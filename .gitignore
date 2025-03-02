@@ -1,0 +1,7 @@
+*.swp
+**/__pycache__/**
+imnet_resnet50_scratch/timm_temp/
+.dumbo.json
+
+prompt =
+python -u "C:/Users/tsets/Desktop/Y-drop/deit/main.py" --data-set CIFAR100 --data-path "C:/Users/tsets/Desktop/Y-drop/data/cifar" --input-size 224 --model deit_small_patch16_224 --batch-size 32 --epochs 100 --lr 1e-3 --drop 0.0 --drop-path 0.1
