@@ -49,7 +49,7 @@ class MyVisionTransformer(VisionTransformer):
         interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
         return interpolated  # shape: [B, n_steps+1, C, H, W]
     
-    def calcualate_scores(self, inputs: torch.Tensor,n_batches:int =1) -> torch.Tensor:
+    def calcualate_scores(self, batches: torch.Tensor,n_batches:int =1) -> torch.Tensor:
         """
         Compute conductance scores through the transformer blocks.
         x: input image batch.
@@ -59,9 +59,7 @@ class MyVisionTransformer(VisionTransformer):
         is expected to (a) save outputs and gradients via save_output_gradients, and
         (b) update its dropout masks using update_dropout_masks().
         """
-        amount = input.shape[0]/n_batches
-        for i in range(n_batches):
-            x = inputs[i*amount:(i+1)*amount]
+        for x in batches:
         # Create interpolation paths from baseline to input.
             interp = self.split_images(x, n_steps=self.n_steps)
             # Flatten the interpolation dimension into the batch dimension.

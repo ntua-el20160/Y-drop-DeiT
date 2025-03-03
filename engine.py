@@ -19,35 +19,29 @@ from timm.utils import accuracy, ModelEma
 import random
 
 import utils
-def sample_random_data(data_loader: Iterable, update_batches: int, device: torch.device):
+def sample_random_batches(data_loader, num_batches: int):
     """
-    Randomly samples 'update_batches' batches from the data_loader,
-    concatenates the samples and targets along the batch dimension,
-    and returns them.
+    Samples a random subset of batches from the data loader.
+    
+    Args:
+        data_loader (Iterable): The data loader providing batches (samples, targets).
+        num_batches (int): Number of batches to sample.
+    
+    Returns:
+        List[Tuple]: A list of (samples, targets) batches.
     """
-    # Convert data_loader to list (if it isn't already) for random sampling.
-    batches = list(data_loader)
-    # If there are fewer batches than update_batches, use all available.
-    num_batches = min(update_batches, len(batches))
-    sampled_batches = random.sample(batches, num_batches)
-    
-    samples_list = []
-    targets_list = []
-    for samples, targets in sampled_batches:
-        samples_list.append(samples.to(device, non_blocking=True))
-        targets_list.append(targets.to(device, non_blocking=True))
-    
-    # Concatenate along the first dimension (batch dimension)
-    samples_cat = torch.cat(samples_list, dim=0)
-    targets_cat = torch.cat(targets_list, dim=0)
-    
-    return samples_cat, targets_cat
+    # Convert the data_loader into a list (only if it is feasible)
+    all_batches = list(data_loader)
+    total = len(all_batches)
+    num_to_sample = min(num_batches, total)
+    sampled_batches = random.sample(all_batches, num_to_sample)
+    return sampled_batches
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_samples:int =32,batch_size:int=32):
+                    update_freq:int=1,update_batches:int =5,batch_size:int=32):
     # TODO fix this for finetuning
     model.train()
     criterion.train()
@@ -68,9 +62,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
                 print('start calculating scores')
-                random_samples, _ = sample_random_data(data_loader, update_samples, device)
-                n_batches = update_samples*model.n_steps/batch_size
-                model.calcualate_scores(random_samples,n_batches)
+                random_batches = sample_random_batches(data_loader,update_batches)
+                model.calcualate_scores(random_batches,update_batches)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
