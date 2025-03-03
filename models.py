@@ -49,7 +49,7 @@ class MyVisionTransformer(VisionTransformer):
         interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
         return interpolated  # shape: [B, n_steps+1, C, H, W]
     
-    def calcualate_scores(self, x: torch.Tensor) -> torch.Tensor:
+    def calcualate_scores(self, inputs: torch.Tensor,n_batches:int =1) -> torch.Tensor:
         """
         Compute conductance scores through the transformer blocks.
         x: input image batch.
@@ -59,35 +59,41 @@ class MyVisionTransformer(VisionTransformer):
         is expected to (a) save outputs and gradients via save_output_gradients, and
         (b) update its dropout masks using update_dropout_masks().
         """
+        amount = input.shape[0]/n_batches
+        for i in range(n_batches):
+            x = inputs[i*amount:(i+1)*amount]
         # Create interpolation paths from baseline to input.
-        interp = self.split_images(x, n_steps=self.n_steps)
-        # Flatten the interpolation dimension into the batch dimension.
-        B, steps, C, H, W = interp.shape
-        interp_flat = interp.view(-1, C, H, W)
+            interp = self.split_images(x, n_steps=self.n_steps)
+            # Flatten the interpolation dimension into the batch dimension.
+            B, steps, C, H, W = interp.shape
+            interp_flat = interp.view(-1, C, H, W)
 
-        # 3. Process through the initial embedding layers.
-        x_emb = self.patch_embed(interp_flat)  # shape: [(n_steps+1)*B, N, D]
-        x_emb = self._pos_embed(x_emb)
-        x_emb = self.patch_drop(x_emb)
-        x_emb = self.norm_pre(x_emb)
+            # 3. Process through the initial embedding layers.
+            x_emb = self.patch_embed(interp_flat)  # shape: [(n_steps+1)*B, N, D]
+            x_emb = self._pos_embed(x_emb)
+            x_emb = self.patch_drop(x_emb)
+            x_emb = self.norm_pre(x_emb)
 
-        # For each block, first run the forward pass to save outputs and gradients.
-        for block in self.blocks:
-            x_emb =block.save_output_gradients(x_emb, n_steps=self.n_steps)
+            # For each block, first run the forward pass to save outputs and gradients.
+            for block in self.blocks:
+                x_emb =block.save_output_gradients(x_emb, n_steps=self.n_steps)
+            
+            x_feat = self.norm(x_emb)
+            x_pool = self.pool(x_feat)            # pool() remains as in the base class.
+            x_fc = self.fc_norm(x_pool)
+            x_out = self.head_drop(x_fc)
+            out = self.head(x_out)
+            
+            # 6. Compute scalar loss and backpropagate to compute gradients.
+            loss = out.sum()
+            loss.backward()
+
+            # Then, update dropout masks based on the saved data.
+            for block in self.blocks:
+                block.calculate_conductance(n_steps=self.n_steps,n_batches=n_batches)
         
-        x_feat = self.norm(x_emb)
-        x_pool = self.pool(x_feat)            # pool() remains as in the base class.
-        x_fc = self.fc_norm(x_pool)
-        x_out = self.head_drop(x_fc)
-        out = self.head(x_out)
-        
-        # 6. Compute scalar loss and backpropagate to compute gradients.
-        loss = out.sum()
-        loss.backward()
-
-        # Then, update dropout masks based on the saved data.
         for block in self.blocks:
-            block.update_dropout_masks(n_steps=self.n_steps)
+            block.update_dropout_masks()
         
         # Optionally, you can run a normal forward pass on x now.
         # Here, we return the original input (or you can run self.forward(x)).

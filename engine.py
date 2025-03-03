@@ -16,14 +16,38 @@ import torch
 
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
+import random
 
 import utils
-
+def sample_random_data(data_loader: Iterable, update_batches: int, device: torch.device):
+    """
+    Randomly samples 'update_batches' batches from the data_loader,
+    concatenates the samples and targets along the batch dimension,
+    and returns them.
+    """
+    # Convert data_loader to list (if it isn't already) for random sampling.
+    batches = list(data_loader)
+    # If there are fewer batches than update_batches, use all available.
+    num_batches = min(update_batches, len(batches))
+    sampled_batches = random.sample(batches, num_batches)
+    
+    samples_list = []
+    targets_list = []
+    for samples, targets in sampled_batches:
+        samples_list.append(samples.to(device, non_blocking=True))
+        targets_list.append(targets.to(device, non_blocking=True))
+    
+    # Concatenate along the first dimension (batch dimension)
+    samples_cat = torch.cat(samples_list, dim=0)
+    targets_cat = torch.cat(targets_list, dim=0)
+    
+    return samples_cat, targets_cat
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False):
+                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
+                    update_freq:int=1,update_samples:int =32,batch_size:int=32):
     # TODO fix this for finetuning
     model.train()
     criterion.train()
@@ -33,7 +57,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -41,8 +66,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             samples, targets = mixup_fn(samples, targets)
 
         with torch.amp.autocast('cuda'):
-            if check:
-                model.calcualate_scores(samples)
+            if check and (batch_idx % update_freq == 0):
+                random_samples, _ = sample_random_data(data_loader, update_samples, device)
+                n_batches = update_samples*model.n_steps/batch_size
+                model.calcualate_scores(random_samples,n_batches)
+
             outputs = model(samples)
             loss = criterion(outputs, targets)
 

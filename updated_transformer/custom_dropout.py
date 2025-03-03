@@ -52,7 +52,7 @@ class MyDropout(nn.Module):
         keep_prob = torch.where(scoring > split, 1 - self.p_high, 1 - self.p_low)
 
         # Print the amount of shifts (from low to high or vice versa).
-        print("Amount of shifts: ", self.count_shifts(keep_prob))
+        #print("Amount of shifts: ", self.count_shifts(keep_prob))
         self.previous = keep_prob
         return
 

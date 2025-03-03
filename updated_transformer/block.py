@@ -98,12 +98,15 @@ class Block(nn.Module):
         x2 = x1 + mlp_out
         return x2
 
-    def update_dropout_masks(self,n_steps: int) -> None:
+    def calculate_conductance(self,n_steps: int,n_batches: int = None) -> None:
         """
         Delegate dropout mask update to submodules based on computed conductance.
         """
-        self.attn.update_dropout_masks(n_steps)
-        self.mlp.update_dropout_masks(n_steps)
+        self.attn.update_dropout_masks(n_steps,n_batches)
+        self.mlp.update_dropout_masks(n_steps,n_batches)
+    def update_dropout_masks(self):
+        self.attn.update_dropout_masks()
+        self.mlp.update_dropout_masks()
         
     def base_dropout(self):
         self.attn.base_dropout()

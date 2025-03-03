@@ -63,6 +63,7 @@ class Mlp(nn.Module):
             
         self._saved = {}   # to hold outputs for fc1_act and fc2.
         self._hooks = []
+        self.conductance={'act': None, 'fc2': None}
 
     def forward(self, x):
         x = self.fc1(x)
@@ -78,6 +79,7 @@ class Mlp(nn.Module):
             self._saved['fc2'] = x_fc2
         x_drop2 = self.drop2(x_fc2)
         return x_drop2
+    
     def save_output_gradients(self, x: torch.Tensor, n_steps: int):
         """
         Run forward pass with dropout disabled to capture outputs at:
@@ -85,6 +87,8 @@ class Mlp(nn.Module):
           - after fc2.
         """
         self._saved = {'act': None, 'fc2': None}
+        
+
         orig_drop1, orig_drop2 = self.drop1, self.drop2
         self.drop1 = nn.Identity()
         self.drop2 = nn.Identity()
@@ -100,14 +104,12 @@ class Mlp(nn.Module):
         y= self.forward(x)
         self.drop1 = orig_drop1
         self.drop2 = orig_drop2
-        self._n_steps = n_steps
         return y
     
-    def update_dropout_masks(self,n_steps: int):
+    def calculate_conductance(self,n_steps: int,n_batches: int = None):
         """
         Compute integrated gradients for the saved outputs and update the dropout masks.
         """
-        conductance = {}
         for key in ['act', 'fc2']:
             act = self._saved.get(key)
             if act is None or act.grad is None:
@@ -120,15 +122,23 @@ class Mlp(nn.Module):
             grad_seg = grads[:-1]
             integrated = (diffs * grad_seg).sum(dim=0) / n_steps  # shape: [B, ...]
             avg_conductance = integrated.mean(dim=0)                    # shape: same as one sample output
-            conductance[key] = avg_conductance
-        if 'act' in conductance:
-            self.drop1.update_dropout_masks(conductance['act'])
-        if 'fc2' in conductance:
-            self.drop2.update_dropout_masks(conductance['fc2'])
+            if n_batches is None: 
+                self.conductance[key] = avg_conductance
+            elif self.conductance[key] is None:
+                self.conductance[key] = avg_conductance/n_batches
+            else:
+                self.conductance[key] += avg_conductance/n_batches
         self._saved.clear()
         for h in self._hooks:
             h.remove()
         self._hooks = []
+    def update_dropout_masks(self):
+        if 'act' in self.conductance:
+            self.drop1.update_dropout_masks( self.conductance['act'])
+        if 'fc2' in  self.conductance:
+            self.drop2.update_dropout_masks( self.conductance['fc2'])
+        self.conductance={'act': None, 'fc2': None}
+
         
     def base_dropout(self):
         self.drop1.base_dropout()
