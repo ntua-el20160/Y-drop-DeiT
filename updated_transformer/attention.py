@@ -116,8 +116,6 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
     
-    def refresh_conductance(self):
-        self.conductance={'attn': 0.0, 'proj': 0.0}
 
     def save_output_gradients(self, x: torch.Tensor, n_steps: int):
         """
@@ -179,6 +177,7 @@ class Attention(nn.Module):
                 self.conductance[key] = avg_conductance/n_batches
             else:
                 self.conductance[key] += avg_conductance/n_batches
+            print('conductance:',key,self.conductance[key])
       
         # Clear saved data and remove hooks.
         self._saved.clear()
@@ -192,6 +191,7 @@ class Attention(nn.Module):
         if 'proj' in self.conductance:
             self.proj_drop.update_dropout_masks(self.conductance['proj'])
         self.conductance={'act': None, 'fc2': None}
+        print('dropout masks updated')
 
     def base_dropout(self):
         self.proj_drop.base_dropout()

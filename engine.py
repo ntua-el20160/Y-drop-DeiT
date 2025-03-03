@@ -67,6 +67,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
+                print('start calculating scores')
                 random_samples, _ = sample_random_data(data_loader, update_samples, device)
                 n_batches = update_samples*model.n_steps/batch_size
                 model.calcualate_scores(random_samples,n_batches)
@@ -114,7 +115,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             output = model(images)
             loss = criterion(output, target)
 

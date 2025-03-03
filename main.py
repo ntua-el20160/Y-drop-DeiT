@@ -288,7 +288,7 @@ def main(args):
     #initially normal dropout
     model.base_dropout()
     check = False
-    custom_dropout_epoch = int(3)#round(0.1*args.epochs))
+    custom_dropout_epoch = int(0)#round(0.1*args.epochs))
     for epoch in range(args.start_epoch, args.epochs):
         if epoch == custom_dropout_epoch:
             model.custom_dropout()
@@ -299,7 +299,7 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            args.clip_grad, model_ema, mixup_fn,check,update_samples=10*args.batch_size,update_freq=20,batch_size=args.batch_size)
+            args.clip_grad, model_ema, mixup_fn,check,update_samples=3*args.batch_size,update_freq=20,batch_size=args.batch_size)
         
 
         lr_scheduler.step(epoch)
