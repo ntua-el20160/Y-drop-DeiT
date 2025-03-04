@@ -16,32 +16,17 @@ import torch
 
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
-import random
 
 import utils
-def sample_random_batches(data_loader, num_batches: int):
-    """
-    Samples a random subset of batches from the data loader.
-    
-    Args:
-        data_loader (Iterable): The data loader providing batches (samples, targets).
-        num_batches (int): Number of batches to sample.
-    
-    Returns:
-        List[Tuple]: A list of (samples, targets) batches.
-    """
-    # Convert the data_loader into a list (only if it is feasible)
-    all_batches = list(data_loader)
-    total = len(all_batches)
-    num_to_sample = min(num_batches, total)
-    sampled_batches = random.sample(all_batches, num_to_sample)
-    return sampled_batches
+
+import itertools
+
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5,batch_size:int=32):
+                    update_freq:int=1,update_batches:int =5):
     # TODO fix this for finetuning
     model.train()
     criterion.train()
@@ -51,7 +36,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    loader = metric_logger.log_every(data_loader, print_freq, header)
+    loader_iter = iter(loader)
+
+    #for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+
+    for batch_idx, (samples, targets) in enumerate(loader_iter):
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -62,8 +52,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
                 print('start calculating scores')
-                random_batches = sample_random_batches(data_loader,update_batches)
-                model.calcualate_scores(random_batches,update_batches)
+                loader_iter, loader_peek = itertools.tee(loader_iter)
+                # Now, get the next "update_batches" batches from the peek iterator.
+                next_batches = list(itertools.islice(loader_peek, update_batches))
+                print()
+                model.calcualate_scores(next_batches,device,update_batches)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)

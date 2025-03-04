@@ -299,7 +299,7 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            args.clip_grad, model_ema, mixup_fn,check,update_samples=3*args.batch_size,update_freq=20,batch_size=args.batch_size)
+            args.clip_grad, model_ema, mixup_fn,check,update_batches=3,update_freq=20)
         
 
         lr_scheduler.step(epoch)
