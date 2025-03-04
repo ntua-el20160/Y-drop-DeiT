@@ -62,7 +62,7 @@ class MyVisionTransformer(VisionTransformer):
         for batch in batches:
             x, _ = batch  # assuming batch is (samples, targets)
             x = x.to(device, non_blocking=True)
-            print(x.shape)
+            #print(x.shape)
             interp = self.split_images(x, n_steps=self.n_steps)
             # Flatten the interpolation dimension into the batch dimension.
             B, steps, C, H, W = interp.shape

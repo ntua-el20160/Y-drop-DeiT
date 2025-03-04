@@ -201,6 +201,7 @@ def main(args):
         drop_last=True,
     )
 
+
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, batch_size=int(1.5 * args.batch_size),
         shuffle=False, num_workers=args.num_workers,
@@ -288,7 +289,7 @@ def main(args):
     #initially normal dropout
     model.base_dropout()
     check = False
-    custom_dropout_epoch = int(0)#round(0.1*args.epochs))
+    custom_dropout_epoch = int(round(0.1*args.epochs))
     for epoch in range(args.start_epoch, args.epochs):
         if epoch == custom_dropout_epoch:
             model.custom_dropout()
@@ -299,7 +300,7 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            args.clip_grad, model_ema, mixup_fn,check,update_batches=3,update_freq=20)
+            args.clip_grad, model_ema, mixup_fn,check,update_batches=1,update_freq=20)
         
 
         lr_scheduler.step(epoch)

@@ -103,10 +103,15 @@ class Attention(nn.Module):
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
-            attn = attn.softmax(dim=-1)
             if 'attn' in self._saved:
+                attn.retain_grad()
                 self._saved['attn'] = attn  # or accumulate if needed
             attn = self.attn_drop(attn)
+            attn = attn.softmax(dim=-1)
+            # attn.retain_grad()
+            # if 'attn' in self._saved:
+            #     self._saved['attn'] = attn  # or accumulate if needed
+            # attn = self.attn_drop(attn)
             x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
@@ -177,7 +182,7 @@ class Attention(nn.Module):
                 self.conductance[key] = avg_conductance/n_batches
             else:
                 self.conductance[key] += avg_conductance/n_batches
-            print('conductance:',key,self.conductance[key])
+            #print('conductance:',key,self.conductance[key])
       
         # Clear saved data and remove hooks.
         self._saved.clear()
@@ -186,12 +191,14 @@ class Attention(nn.Module):
         self._hooks = []
     
     def update_dropout_masks(self):
+        #print("update dropout",self.conductance['attn'],self.conductance['proj'])
         if 'attn' in self.conductance:
             self.attn_drop.update_dropout_masks(self.conductance['attn'])
         if 'proj' in self.conductance:
             self.proj_drop.update_dropout_masks(self.conductance['proj'])
-        self.conductance={'act': None, 'fc2': None}
-        print('dropout masks updated')
+        self.conductance = {'attn': None, 'proj': None}
+
+        #print('dropout masks updated')
 
     def base_dropout(self):
         self.proj_drop.base_dropout()

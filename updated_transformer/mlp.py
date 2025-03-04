@@ -70,6 +70,7 @@ class Mlp(nn.Module):
         x_act = self.act(x)
         # Save the output after activation if hooks are set.
         if 'act' in self._saved:
+            x_act.retain_grad()
             self._saved['act'] = x_act
         x_drop1 = self.drop1(x_act)
         x_norm = self.norm(x_drop1)
@@ -128,6 +129,7 @@ class Mlp(nn.Module):
                 self.conductance[key] = avg_conductance/n_batches
             else:
                 self.conductance[key] += avg_conductance/n_batches
+            #print('conductance:',key,self.conductance[key])
         self._saved.clear()
         for h in self._hooks:
             h.remove()

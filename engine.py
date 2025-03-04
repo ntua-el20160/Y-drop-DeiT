@@ -26,7 +26,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5):
+                    update_freq:int=1,update_batches:int =5,dropout_data_loader:Iterable=None) -> dict:
     # TODO fix this for finetuning
     model.train()
     criterion.train()
@@ -36,26 +36,30 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    loader = metric_logger.log_every(data_loader, print_freq, header)
-    loader_iter = iter(loader)
+    # Wrap one of them with the metric logger for training.
+    logged_iter = metric_logger.log_every(data_loader, print_freq, header)
+    new_iter = iter(data_loader)
+    for batch_idx, (samples, targets) in enumerate(logged_iter):
+
+
 
     #for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
-    for batch_idx, (samples, targets) in enumerate(loader_iter):
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-
+        try:
+            next(new_iter)
+        except StopIteration:
+            break
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
                 print('start calculating scores')
-                loader_iter, loader_peek = itertools.tee(loader_iter)
+                # Get the next update_batches batches.
+                next_batches = list(itertools.islice(new_iter, update_batches))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                next_batches = list(itertools.islice(loader_peek, update_batches))
-                print()
                 model.calcualate_scores(next_batches,device,update_batches)
 
             outputs = model(samples)
