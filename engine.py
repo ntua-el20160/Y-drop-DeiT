@@ -42,7 +42,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     for batch_idx, (samples, targets) in enumerate(logged_iter):
 
 
-
     #for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
 
@@ -50,15 +49,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         targets = targets.to(device, non_blocking=True)
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-        try:
-            next(new_iter)
-        except StopIteration:
-            break
+        
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
-                print('start calculating scores')
                 # Get the next update_batches batches.
+                print("Updating the model",batch_idx)
                 next_batches = list(itertools.islice(new_iter, update_batches))
+
                 # Now, get the next "update_batches" batches from the peek iterator.
                 model.calcualate_scores(next_batches,device,update_batches)
 
