@@ -158,6 +158,23 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # --- Custom Dropout Hyperparameters ---
+    parser.add_argument('--custom_dropout', action='store_true', help='Enable custom dropout')
+    parser.add_argument('--no-custom_dropout', action='store_false', dest='custom_dropout', help='Disable custom dropout')
+    parser.set_defaults(custom_dropout=True)
+    parser.add_argument('--custom_dropout_rates', type=float, nargs=2, default=[0.1, 0.3],
+                        help='Two values for custom dropout rates (p_low and p_high)')
+    parser.add_argument('--elasticity', type=float, default=0.01,
+                        help='Elasticity factor for custom dropout')
+    parser.add_argument('--mean_shift', type=float, default=0.5,
+                        help='Mean shift for custom dropout')
+    parser.add_argument('--annealing_factor', type=float, default=5,
+                        help='Annealing factor for custom dropout')
+    
+    
+    parser.add_argument('--early_stopping_patience', type=int, default=10,
+                        help='Number of epochs with no improvement in eval loss before early stopping')
     return parser
 
 
@@ -277,23 +294,37 @@ def main(args):
             args.start_epoch = checkpoint['epoch'] + 1
             if args.model_ema:
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+        
+        cumulative_train_time = checkpoint.get('train_time', 0.0)
+    else:
+        cumulative_train_time = 0.0
 
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         return
 
+    if args.custom_dropout:
+        model.update_hyperparameters(p_high=args.custom_dropout_rates[1], p_low=args.custom_dropout_rates[0], elasticity=args.elasticity, mean_shift=args.mean_shift, p=args.drop, layer=1, module="attn")
+        model.update_hyperparameters(p_high=args.custom_dropout_rates[1], p_low=args.custom_dropout_rates[0], elasticity=args.elasticity, mean_shift=args.mean_shift, p=args.drop, layer=2, module="attn")
+        model.update_hyperparameters(p_high=args.custom_dropout_rates[1], p_low=args.custom_dropout_rates[0], elasticity=args.elasticity, mean_shift=args.mean_shift, p=args.drop,layer = None, module="mlp")
+
     print("Start training")
     start_time = time.time()
     max_accuracy = 0.0
+    patience_counter = 0  # Counter for early stopping
+
+    best_loss = float('inf')
     #initially normal dropout
     model.base_dropout()
     check = False
-    custom_dropout_epoch = int(round(0))
     for epoch in range(args.start_epoch, args.epochs):
-        if epoch == custom_dropout_epoch:
+        epoch_start_time = time.time()
+        
+        if args.custom_dropout and epoch >= args.annealing_factor:
             model.custom_dropout()
             check = True
+        
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
@@ -302,11 +333,39 @@ def main(args):
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,check,update_batches=2,update_freq=5)
         
+        
+
+        
 
         lr_scheduler.step(epoch)
+        epoch_time = time.time() - epoch_start_time
+        cumulative_train_time += epoch_time
+
+        test_stats = evaluate(data_loader_val, model, device)
+        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        max_accuracy = max(max_accuracy, test_stats["acc1"])
+        test_acc = test_stats.get('acc1', 0.0)
+        test_loss = test_stats.get('loss', 0.0)
+        print(f'Max accuracy: {max_accuracy:.2f}%')
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            for checkpoint_path in checkpoint_paths:
+            checkpoint_path = output_dir / 'checkpoint.pth'
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'model_ema': get_state_dict(model_ema),
+                'args': args,
+                'test_acc': test_acc,
+                'test_loss': test_loss,
+                'train_time': cumulative_train_time,  # cumulative training time so far
+            }, checkpoint_path)
+        
+        if test_loss < best_loss:
+            best_loss = test_loss
+            patience_counter = 0  # reset early stopping counter
+            if args.output_dir:
+                best_checkpoint_path = output_dir / 'best.pth'
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -314,12 +373,33 @@ def main(args):
                     'epoch': epoch,
                     'model_ema': get_state_dict(model_ema),
                     'args': args,
-                }, checkpoint_path)
+                    'test_acc': test_acc,
+                    'test_loss': test_loss,
+                    'train_time': cumulative_train_time,
+                }, best_checkpoint_path)
+        else:
+            patience_counter += 1
+        
+        if epoch == 4 or epoch == 9 or epoch == 19:
+            checkpoint_path = Path('drive/MyDrive/models/mine') / f'base_epoch_{epoch}.pth'
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'model_ema': get_state_dict(model_ema),
+                'args': args,
+                'test_acc': test_acc,
+                'test_loss': test_loss,
+                'train_time': cumulative_train_time,  # cumulative training time so far
+            }, checkpoint_path)
 
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        max_accuracy = max(max_accuracy, test_stats["acc1"])
-        print(f'Max accuracy: {max_accuracy:.2f}%')
+        if patience_counter >= args.early_stopping_patience:
+            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
+            break
+
+
+        
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
@@ -330,7 +410,7 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    total_time = time.time() - start_time
+    total_time = cumulative_train_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 

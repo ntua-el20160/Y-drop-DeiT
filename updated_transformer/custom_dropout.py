@@ -20,16 +20,25 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 
 class MyDropout(nn.Module):
-    def __init__(self, p_high=0.7, p_low=0.2):
+    def __init__(self, p_high=0.1, p_low=0.3,elasticity = 1.0,mean_shift =0.5,p=None):
         """
         p_high: dropout probability for elements with a high score (score > split)
         p_low: dropout probability for elements with a low score (score <= split)
+        elasticity: how quickly the dropout mask changes (0 = no change, 1 = immediate change)
+        mean_shift: how much to shift the split point from the median
+        p: standard dropout rate if needed
         """
         super(MyDropout, self).__init__()
         self.p_high = p_high
         self.p_low = p_low
-        self.p = (p_high+p_low)/2
+        if p is None:
+            self.p = (p_high+p_low)/2
+        else:
+            self.p = p
+        self.elasticity = elasticity
+        self.mean_shift = mean_shift
         self.previous  = None
+        self.scaling = None
         self.base = False
     
     def count_shifts(self, mask):
@@ -44,25 +53,48 @@ class MyDropout(nn.Module):
         #calculate the split point
         median = torch.median(scoring)
         mean = torch.mean(scoring)
-        split = median + (mean - median)/2
-        """ test if this split is good, maybe go back to the original""" 
-        
+        split = median + (mean - median)*self.mean_shift
+        """ test if this split is good, maybe go back to the original"""
+
+        if self.scaling == None: #initialise scaling
+            self.scaling = torch.full_like(scoring, 0.5*(self.p_high+self.p_low))
+
         # Assign dropout (keep) probabilities according to the split.
         # For scores above the split, keep probability is 1 - p_high; otherwise 1 - p_low.
         keep_prob = torch.where(scoring > split, 1 - self.p_high, 1 - self.p_low)
 
         # Print the amount of shifts (from low to high or vice versa).
         #print("Amount of shifts: ", self.count_shifts(keep_prob))
+        
+        #update scaling
+        self.scaling = self.scaling*(1-self.elasticity) + keep_prob*self.elasticity
+        
         self.previous = keep_prob
         return
 
     def reset_dropout_masks(self):
+        """Reset the dropout masks to None."""
         self.previous = None
+        self.scaling = None
         return
+    def update_parameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None):
+        """Update the hyperparameters of the custom dropout layer."""
+        if p_high is not None:
+            self.p_high = p_high
+        if p_low is not None:
+            self.p_low = p_low
+        if elasticity is not None:
+            self.elasticity = elasticity
+        if mean_shift is not None:
+            self.mean_shift = mean_shift
+        if p is not None:
+            self.p = p
     def base_dropout(self):
+        """Use the standard dropout."""
         self.base = True
         return
     def custom_dropout(self):
+        """Use the custom dropout."""
         self.base = False
         return
 
@@ -84,4 +116,4 @@ class MyDropout(nn.Module):
 
             mask = torch.empty_like(input).bernoulli_(keep_prob_noisy)
             # Scale the surviving activations by dividing by the corresponding keep probability.
-            return mask * input / keep_prob_noisy
+            return mask * input / self.scaling

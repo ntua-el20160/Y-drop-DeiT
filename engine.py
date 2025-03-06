@@ -57,7 +57,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 next_batches = list(itertools.islice(new_iter, update_batches))
 
                 # Now, get the next "update_batches" batches from the peek iterator.
-                model.calcualate_scores(next_batches,device,update_batches)
+                model.calculate_scores(next_batches,device,update_batches)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)

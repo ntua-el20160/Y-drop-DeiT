@@ -49,7 +49,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
         
         if drop_custom is not None:
-            self.drop1 = MyDropout(p_high=drop_custom[1], p_low=drop_custom[0])
+            self.drop1 = MyDropout(p_high=drop_custom[1], p_low=drop_custom[0],p=drop_probs[0])
         else:
             self.drop1 = nn.Dropout(drop_probs[0])
 
@@ -57,7 +57,7 @@ class Mlp(nn.Module):
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
 
         if drop_custom is not None:
-            self.drop2 = MyDropout(p_high=drop_custom[1], p_low=drop_custom[0])
+            self.drop2 = MyDropout(p_high=drop_custom[1], p_low=drop_custom[0],p=drop_probs[1])
         else:
             self.drop2 = nn.Dropout(drop_probs[1])
             
@@ -148,3 +148,11 @@ class Mlp(nn.Module):
     def custom_dropout(self):
         self.drop1.custom_dropout()
         self.drop2.custom_dropout()
+    def update_hyperparameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None,layer= None):
+        if layer == 1:
+            self.drop1.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+        elif layer ==2:
+            self.drop2.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+        else:
+            self.drop1.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+            self.drop2.update_parameters(p_high,p_low,elasticity,mean_shift,p)

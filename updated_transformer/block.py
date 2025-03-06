@@ -118,5 +118,14 @@ class Block(nn.Module):
         self.mlp.custom_dropout() 
         return
     
+    def update_hyperparameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None,layer= None,module =None):
+        if module == "attn":
+            self.attn.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer)
+        elif module =="mlp":
+            self.mlp.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer)
+        else:
+            self.attn.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer)
+            self.mlp.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer)
+    
     
 

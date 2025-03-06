@@ -75,13 +75,13 @@ class Attention(nn.Module):
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         
         if attn_drop_custom is not None:
-            self.attn_drop = MyDropout(p_high=attn_drop_custom[1], p_low=attn_drop_custom[0])
+            self.attn_drop = MyDropout(p_high=attn_drop_custom[1], p_low=attn_drop_custom[0],p=attn_drop)
         else:
             self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
 
         if proj_drop_custom is not None:
-            self.proj_drop = MyDropout(p_high=proj_drop_custom[1], p_low=proj_drop_custom[0])
+            self.proj_drop = MyDropout(p_high=proj_drop_custom[1], p_low=proj_drop_custom[0],p=proj_drop)
         else:
             self.proj_drop = nn.Dropout(proj_drop)
 
@@ -207,4 +207,13 @@ class Attention(nn.Module):
     def custom_dropout(self):
         self.proj_drop.custom_dropout()
         self.attn_drop.custom_dropout()
+        return
+    def update_hyperparameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None,layer= None):
+        if layer == 1:
+            self.attn_drop.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+        elif layer ==2:
+            self.proj_drop.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+        else:
+            self.attn_drop.update_parameters(p_high,p_low,elasticity,mean_shift,p)
+            self.proj_drop.update_parameters(p_high,p_low,elasticity,mean_shift,p)
         return

@@ -49,7 +49,7 @@ class MyVisionTransformer(VisionTransformer):
         interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
         return interpolated  # shape: [B, n_steps+1, C, H, W]
     
-    def calcualate_scores(self, batches: torch.Tensor,device: torch.device,n_batches:int =1,) -> torch.Tensor:
+    def calculate_scores(self, batches: torch.Tensor,device: torch.device,n_batches:int =1,) -> torch.Tensor:
         """
         Compute conductance scores through the transformer blocks.
         x: input image batch.
@@ -105,6 +105,10 @@ class MyVisionTransformer(VisionTransformer):
     def custom_dropout(self):
         for block in self.blocks:
             block.custom_dropout()
+        return
+    def update_hyperparameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None,layer= None,module =None):
+        for block in self.blocks:
+            block.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer,module)
         return
 
 
