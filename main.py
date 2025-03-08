@@ -171,6 +171,12 @@ def get_args_parser():
                         help='Mean shift for custom dropout')
     parser.add_argument('--annealing_factor', type=float, default=5,
                         help='Annealing factor for custom dropout')
+    parser.add_argument('--n_steps',type=int,default = 5,
+                         help ='intermediate steps for conductance calculation')
+    parser.add_argument('--update_batches',type=int,default = 1,
+                         help ='intermediate steps for conductance calculation')
+    parser.add_argument('--update_freq',type=int,default = 1,
+                            help ='intermediate steps for conductance calculation')
     
     
     parser.add_argument('--early_stopping_patience', type=int, default=10,
@@ -281,6 +287,7 @@ def main(args):
         criterion = torch.nn.CrossEntropyLoss()
 
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -296,7 +303,10 @@ def main(args):
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
         
         cumulative_train_time = checkpoint.get('train_time', 0.0)
+        saved_epoch = checkpoint.get('epoch', 0)
+
     else:
+        saved_epoch = 0
         cumulative_train_time = 0.0
 
     if args.eval:
@@ -318,6 +328,8 @@ def main(args):
     #initially normal dropout
     model.base_dropout()
     check = False
+    if saved_epoch >= args.start_epoch:
+        args.start_epoch = saved_epoch + 1
     for epoch in range(args.start_epoch, args.epochs):
         epoch_start_time = time.time()
         
@@ -331,7 +343,7 @@ def main(args):
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
-            args.clip_grad, model_ema, mixup_fn,check,update_batches=2,update_freq=5)
+            args.clip_grad, model_ema, mixup_fn,check,update_batches=args.update_batches,update_freq=args.update_freq)
         
         
 
