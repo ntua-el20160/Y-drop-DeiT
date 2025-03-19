@@ -106,8 +106,9 @@ class Block(nn.Module):
         self.attn.calculate_conductance(n_steps,n_batches)
         self.mlp.calculate_conductance(n_steps,n_batches)
     def update_dropout_masks(self):
-        self.attn.update_dropout_masks()
-        self.mlp.update_dropout_masks()
+        shifts_attn =self.attn.update_dropout_masks()
+        shifts_mlp =self.mlp.update_dropout_masks()
+        return shifts_attn+shifts_mlp
         
     def base_dropout(self):
         self.attn.base_dropout()

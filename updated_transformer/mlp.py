@@ -136,10 +136,11 @@ class Mlp(nn.Module):
         self._hooks = []
     def update_dropout_masks(self):
         if 'act' in self.conductance:
-            self.drop1.update_dropout_masks( self.conductance['act'])
+            shifts_act =self.drop1.update_dropout_masks( self.conductance['act'])
         if 'fc2' in  self.conductance:
-            self.drop2.update_dropout_masks( self.conductance['fc2'])
+            shifts_fc2 = self.drop2.update_dropout_masks( self.conductance['fc2'])
         self.conductance={'act': None, 'fc2': None}
+        return shifts_act+shifts_fc2
 
         
     def base_dropout(self):

@@ -65,12 +65,12 @@ class MyDropout(nn.Module):
 
         # Print the amount of shifts (from low to high or vice versa).
         #print("Amount of shifts: ", self.count_shifts(keep_prob))
-        
+        shifts = self.count_shifts(keep_prob)
         #update scaling
         self.scaling = self.scaling*(1-self.elasticity) + keep_prob*self.elasticity
         
         self.previous = keep_prob
-        return
+        return shifts
 
     def reset_dropout_masks(self):
         """Reset the dropout masks to None."""

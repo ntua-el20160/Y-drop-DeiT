@@ -207,9 +207,10 @@ class MyVisionTransformer(VisionTransformer):
                     block.calculate_conductance(n_steps=self.n_steps, n_batches=n_batches)
 
     # After processing all batches, update the dropout masks.
+        shifts = 0
         for block in self.blocks:
-            block.update_dropout_masks()
-
+            shifts+=block.update_dropout_masks()
+        print('Total shifts:',shifts)
         return out
 
     def base_dropout(self):

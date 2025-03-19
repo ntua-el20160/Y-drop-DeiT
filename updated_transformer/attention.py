@@ -193,10 +193,11 @@ class Attention(nn.Module):
     def update_dropout_masks(self):
         #print("update dropout",self.conductance['attn'],self.conductance['proj'])
         if 'attn' in self.conductance:
-            self.attn_drop.update_dropout_masks(self.conductance['attn'])
+            shifts_attn =self.attn_drop.update_dropout_masks(self.conductance['attn'])
         if 'proj' in self.conductance:
-            self.proj_drop.update_dropout_masks(self.conductance['proj'])
+            shifts_proj =self.proj_drop.update_dropout_masks(self.conductance['proj'])
         self.conductance = {'attn': None, 'proj': None}
+        return shifts_attn+shifts_proj
 
         #print('dropout masks updated')
 
