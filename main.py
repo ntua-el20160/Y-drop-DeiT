@@ -305,10 +305,16 @@ def main(args):
         
         cumulative_train_time = checkpoint.get('train_time', 0.0)
         saved_epoch = checkpoint.get('epoch', 0)
+        max_accuracy = checkpoint.get('best_acc', 0.0)
+        patience_counter = checkpoint.get('patience_counter', 0)
+
+
 
     else:
         saved_epoch = 0
         cumulative_train_time = 0.0
+        max_accuracy = 0.0
+        patience_counter = 0
 
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
@@ -322,9 +328,6 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
-    max_accuracy = 0.0
-    patience_counter = 0  # Counter for early stopping
-
     best_loss = float('inf')
     #initially normal dropout
     model.base_dropout()
@@ -372,6 +375,8 @@ def main(args):
                 'test_acc': test_acc,
                 'test_loss': test_loss,
                 'train_time': cumulative_train_time,  # cumulative training time so far
+                'best_acc': max_accuracy,
+                'patience_counter': patience_counter
             }, checkpoint_path)
         
         if test_loss < best_loss:
@@ -389,6 +394,8 @@ def main(args):
                     'test_acc': test_acc,
                     'test_loss': test_loss,
                     'train_time': cumulative_train_time,
+                    'best_acc': max_accuracy,
+                    'patience_counter': patience_counter
                 }, best_checkpoint_path)
         else:
             patience_counter += 1
