@@ -226,7 +226,6 @@ class CNN6_S1(nn.Module):
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
         model_clone.eval()  
-        model_clone.eval()  # Make sure it’s in eval mode to freeze things like batchnorm statistics.
         model_clone.conductance = {'fc1': 0.0, 'fc2': 0.0}
         for batch in batches:
             x, _ = batch  # assuming batch is (samples, targets)
@@ -262,6 +261,40 @@ class CNN6_S1(nn.Module):
             # baseline = torch.zeros_like(x)
             # output_diff = (model_clone(x) - model_clone(baseline)).sum().item()
             # print(f"Model output difference: {output_diff:.4f}")
+            model_clone.update_dropout_masks(stats)
+    def effecient_conductance_calculation(self, batches: Iterable, device: torch.device,stats = True) -> None:
+
+        model_clone = copy.deepcopy(self)
+        model_clone.to(device)
+        model_clone.eval()  # Make sure it’s in eval mode to freeze things like batchnorm statistics.
+        model_clone.conductance = {'fc1': 0.0, 'fc2': 0.0}
+        for batch in batches:
+            x, _ = batch  # assuming batch is (samples, targets)
+            x_captum = x.detach().clone().requires_grad_()
+            x_captum = x_captum.to(device, non_blocking=True)
+            # baseline = torch.zeros_like(x_captum)
+            # outputs = model_clone(x_captum)
+            # pred = outputs.argmax(dim=1)
+            # lc_fc1 = LayerConductance(model_clone, model_clone.relu1)
+            # captum_attr_fc1 = lc_fc1.attribute(x_captum, baselines=baseline, target=pred,n_steps =model_clone.n_steps)
+            # # Compute layer conductance for fc2 using the ReLU after fc2.
+            # lc_fc2 = LayerConductance(model_clone, model_clone.relu2)
+            # captum_attr_fc2 = lc_fc2.attribute(x_captum, baselines=baseline, target=pred,n_steps = model_clone.n_steps)
+            # # Average out the conductance across the batch.
+            # model_clone.conductance['fc1'] += captum_attr_fc1.mean(dim=0)
+            # model_clone.conductance['fc2'] += captum_attr_fc2.mean(dim=0)
+
+            interp = model_clone.split_images(x_captum, n_steps=model_clone.n_steps)
+            interp
+            B, steps, C, H, W = interp.shape
+            interp_flat = interp.view(-1, C, H, W)
+            out = model_clone.save_output_gradients(interp_flat, model_clone.n_steps)
+            loss = out.sum()
+            loss.backward()
+            model_clone.calculate_conductance(n_steps=model_clone.n_steps, n_batches=n_batches)
+            baseline = torch.zeros_like(x)
+            output_diff = (model_clone(x) - model_clone(baseline)).sum().item()
+            print(f"Model output difference: {output_diff:.4f}")
             model_clone.update_dropout_masks(stats)
 
         
@@ -487,8 +520,11 @@ def main(args):
                 'train_stats': train_stats,
                 'test_stats': test_stats,
                 'train_time': cumulative_train_time,
-                'best_acc': best_acc,
-                'history': {
+                'best_acc': best_acc,  
+            }
+        if args.use_custom_dropout:
+            checkpoint['history'] = {
+                
                 'drop1': {
                     'avg_scoring': model.drop1.avg_scoring,
                     'avg_dropout': model.drop1.avg_dropout,
@@ -502,7 +538,7 @@ def main(args):
                     'var_dropout': model.drop2.var_dropout,
                 }
             }
-            }
+            
         torch.save(checkpoint, output_dir / "checkpoint.pth")
 
         # Save checkpoint if a new best accuracy is reached.

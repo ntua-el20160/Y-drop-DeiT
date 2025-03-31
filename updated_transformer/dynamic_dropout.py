@@ -83,16 +83,14 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            exps = torch.exp(scoring - scoring.max())
-            probs = exps / exps.sum()
+            probs = torch.softmax(-scoring, dim=0)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
             keep_prob = raw_keep.clamp(min=0.2, max=0.95)
 
         elif self.mask_type == "softmax_renorm":
-            exps = torch.exp(scoring - scoring.max())
-            probs = exps / exps.sum()
+            probs = torch.softmax(-scoring, dim=0)
 
             raw_keep = probs * self.scaling.numel() * self.base_keep
             keep_prob = raw_keep.clamp(min=0.0, max=1.0)
@@ -104,7 +102,7 @@ class MyDropout(nn.Module):
         elif self.mask_type == "rank":
             #flatten scores and sort them
             flat_scores = scoring.view(-1)
-            sorted_indices = torch.argsort(flat_scores, descending=True)
+            sorted_indices = torch.argsort(flat_scores, descending=False)
 
             #create ramp from 1 to 0
             ranks = torch.arange(len(flat_scores), device=scoring.device).float()
@@ -133,7 +131,7 @@ class MyDropout(nn.Module):
             denom = (s_max - s_min).clamp(min=1e-6)
             scaled = (scoring - s_min) / denom  # [0, 1]
             # Scale to [-2, 2]
-            scaled = 4.0 * scaled - 2.0        # map to [-2, 2]
+            scaled = -(4.0 * scaled - 2.0)        # map to [-2, 2]
 
             # Apply sigmoid to get keep probability
             keep_prob = torch.sigmoid(scaled)
