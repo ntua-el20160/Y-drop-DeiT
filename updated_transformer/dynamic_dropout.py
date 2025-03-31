@@ -181,6 +181,7 @@ class MyDropout(nn.Module):
         - dropout: a tensor of shape [channels] (new keep probabilities)
         """
         # Convert tensors to NumPy arrays and append a copy to the history lists.
+ 
         self.stats["scoring_history"].append(scoring.detach().cpu().numpy().copy())
         self.stats["dropout_history"].append(dropout.detach().cpu().numpy().copy())
     def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):

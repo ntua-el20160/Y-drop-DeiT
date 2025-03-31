@@ -262,6 +262,23 @@ class CNN6_S1(nn.Module):
             # output_diff = (model_clone(x) - model_clone(baseline)).sum().item()
             # print(f"Model output difference: {output_diff:.4f}")
             model_clone.update_dropout_masks(stats)
+            self.drop1.load_state_dict(model_clone.drop1.state_dict())
+            self.drop2.load_state_dict(model_clone.drop2.state_dict())
+            self.drop1.scaling = model_clone.drop1.scaling.detach().clone()
+            self.drop2.scaling = model_clone.drop2.scaling.detach().clone()
+            self.drop1.previous = model_clone.drop1.previous.detach().clone()
+            self.drop2.previous = model_clone.drop2.previous.detach().clone()
+            self.drop1.stats = model_clone.drop1.stats.copy()
+            self.drop2.stats = model_clone.drop2.stats.copy()
+            self.drop1.avg_scoring = model_clone.drop1.avg_scoring
+            self.drop2.avg_scoring = model_clone.drop2.avg_scoring
+            self.drop1.avg_dropout = model_clone.drop1.avg_dropout
+            self.drop2.avg_dropout = model_clone.drop2.avg_dropout
+            self.drop1.var_scoring = model_clone.drop1.var_scoring
+            self.drop2.var_scoring = model_clone.drop2.var_scoring
+            self.drop1.var_dropout = model_clone.drop1.var_dropout
+            self.drop2.var_dropout = model_clone.drop2.var_dropout
+            self.train()
     def effecient_conductance_calculation(self, batches: Iterable, device: torch.device,stats = True) -> None:
 
         model_clone = copy.deepcopy(self)
@@ -501,6 +518,7 @@ def main(args):
 
         epoch_time = time.time() - start_time
         cumulative_train_time += epoch_time
+        print(stats)
         
         
         # Evaluate on the test set.
