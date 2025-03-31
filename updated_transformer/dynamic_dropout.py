@@ -35,7 +35,6 @@ class MyDropout(nn.Module):
         super(MyDropout, self).__init__()
       
         self.p = p
-        print(self.p)
         self.elasticity = elasticity
         self.register_buffer("previous", torch.full((num_channels,), 1 - p))
         self.register_buffer("scaling", torch.full((num_channels,), 1 - p))
@@ -56,6 +55,7 @@ class MyDropout(nn.Module):
         self.avg_dropout = []
         self.var_scoring = []
         self.var_dropout = []
+
 
 
     

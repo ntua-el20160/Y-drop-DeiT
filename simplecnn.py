@@ -400,13 +400,26 @@ def main(args):
     
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device)
+        checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resumed at epoch {start_epoch}")
         cumulative_train_time = checkpoint['train_time']
         best_acc = checkpoint['best_acc']
+        history = checkpoint.get('history', {})
+        if history:
+            drop1_history = history.get('drop1', {})
+            drop2_history = history.get('drop2', {})
+            model.drop1.avg_scoring = drop1_history.get('avg_scoring', [])
+            model.drop1.avg_dropout = drop1_history.get('avg_dropout', [])
+            model.drop1.var_scoring = drop1_history.get('var_scoring', [])
+            model.drop1.var_dropout = drop1_history.get('var_dropout', [])
+            
+            model.drop2.avg_scoring = drop2_history.get('avg_scoring', [])
+            model.drop2.avg_dropout = drop2_history.get('avg_dropout', [])
+            model.drop2.var_scoring = drop2_history.get('var_scoring', [])
+            model.drop2.var_dropout = drop2_history.get('var_dropout', [])
     else:
         start_epoch = 0
         cumulative_train_time = 0.0
@@ -475,6 +488,20 @@ def main(args):
                 'test_stats': test_stats,
                 'train_time': cumulative_train_time,
                 'best_acc': best_acc,
+                'history': {
+                'drop1': {
+                    'avg_scoring': model.drop1.avg_scoring,
+                    'avg_dropout': model.drop1.avg_dropout,
+                    'var_scoring': model.drop1.var_scoring,
+                    'var_dropout': model.drop1.var_dropout,
+                },
+                'drop2': {
+                    'avg_scoring': model.drop2.avg_scoring,
+                    'avg_dropout': model.drop2.avg_dropout,
+                    'var_scoring': model.drop2.var_scoring,
+                    'var_dropout': model.drop2.var_dropout,
+                }
+            }
             }
         torch.save(checkpoint, output_dir / "checkpoint.pth")
 
