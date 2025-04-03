@@ -21,6 +21,7 @@ from timm.utils import NativeScaler
 import copy
 from typing import Iterable
 from captum.attr import LayerConductance
+from evaluate_gradients.MultiLayerConductance import MultiLayerConductance
 
 
 class CNN6_S1(nn.Module):
@@ -48,17 +49,18 @@ class CNN6_S1(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)
         
         # Use MyDropout for fc1 and fc2 outputs.
+        self.drop_layer_list = [self.relu1, self.relu2]
+        self.drop_list =[]
+
         if use_custom_dropout:
-            self.drop1 = MyDropout(elasticity=elasticity, p=p, num_channels=1024,mask_type = mask_type, scaler = scaler)
-            self.drop2 = MyDropout(elasticity=elasticity, p=p, num_channels=1024,mask_type = mask_type, scaler = scaler)
+            self.scores ={}
+            for i,layer in enumerate(self.drop_layer_list):
+                self.drop_list.append(MyDropout(elasticity=elasticity, p=p, tied_layer=layer,mask_type = mask_type, scaler = scaler))
+                self.scores[f"drop_{i}"] = None
         else:
-            self.drop1 = nn.Dropout(p)
-            self.drop2 = nn.Dropout(p)
+            for layer in self.drop_layer_list:
+                self.drop_list.append(nn.Dropout(p))
         
-        # Integrated gradients placeholders.
-        self._saved = {}
-        self._hooks = []
-        self.conductance = {'fc1': None, 'fc2': None}
         
     def forward(self, x):
         # Convolutional layers.
@@ -77,156 +79,28 @@ class CNN6_S1(nn.Module):
         # Save pre-activation if needed for integrated gradients:
         x1 = self.relu1(pre_fc1)  # This is the post-ReLU activation for fc1.
 
-        if 'fc1' in self._saved:
-            x1.retain_grad()
-            self._saved['fc1'] = x1
-        x1 = self.drop1(x1)
+
+        x1 = self.drop_list[0](x1)
         
         # fc2: raw output, then ReLU, then dropout.
         pre_fc2 = self.fc2(x1)
         x2 = self.relu2(pre_fc2)  # Post-ReLU activation for fc2.
-        if 'fc2' in self._saved:
-            x2.retain_grad()
-            self._saved['fc2'] = x2
-        x2 = self.drop2(x2)
+        x2 = self.drop_list[1](x2)
         
         # Final classification layer.
         out = self.fc3(x2)
         return out
 
-    def split_images(self, x: torch.Tensor, n_steps: int = None) -> torch.Tensor:
-        """
-        Create interpolation paths from a baseline (zeros) to x.
-        Returns a tensor of shape [B, n_steps+1, C, H, W] where B is the batch size.
-        """
-        if n_steps is None:
-            n_steps = self.n_steps
-        baseline = torch.zeros_like(x)  # shape: [B, C, H, W]
-        alphas = torch.linspace(0, 1, steps=n_steps + 1, device=x.device).view(1, n_steps + 1, 1, 1, 1)
-        x_exp = x.unsqueeze(1)          # shape: [B, 1, C, H, W]
-        baseline_exp = baseline.unsqueeze(1)  # shape: [B, 1, C, H, W]
-        interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
-        return interpolated  # shape: [B, n_steps+1, C, H, W]
-
-    def save_output_gradients(self, x: torch.Tensor, n_steps: int):
-        """
-        Run forward pass with dropout disabled to capture outputs at:
-          - after activation (fc1+act) and
-          - after fc2.
-        """
-        self._saved = {'fc1': None, 'fc2': None}
-        
-
-        orig_drop1, orig_drop2 = self.drop1, self.drop2
-        self.drop1 = nn.Identity()
-        self.drop2 = nn.Identity()
-        # def hook_fn(name):
-        #     def hook(module, input, output):
-        #         if isinstance(output, torch.Tensor):
-        #             output.retain_grad()
-        #         self._saved[name] = output
-        #     return hook
-        # h1 = self.fc1.register_forward_hook(hook_fn('fc1'))  
-        # h2 = self.fc2.register_forward_hook(hook_fn('fc2'))
-        def hook_fc1(module, input, output):
-            if isinstance(output, torch.Tensor):
-                output.retain_grad()
-            self._saved['fc1'] = output
-        h1 = self.relu1.register_forward_hook(hook_fc1)
-        
-        # Register a hook on the ReLU module for fc2.
-        def hook_fc2(module, input, output):
-            if isinstance(output, torch.Tensor):
-                output.retain_grad()
-            self._saved['fc2'] = output
-        h2 = self.relu2.register_forward_hook(hook_fc2)
-        
-        self._hooks = [h1, h2]
-        y= self.forward(x)
-        self.drop1 = orig_drop1
-        self.drop2 = orig_drop2
-        return y
-    def calculate_conductance(self, n_steps: int, n_batches: int = None):
-        """
-        Compute integrated gradients for the saved outputs and update the dropout masks.
-        """
-        for key in ['fc1', 'fc2']:
-            act = self._saved.get(key)
-            if act is None:
-                print(f"[calculate_conductance] No saved activation for {key}.")
-                continue
-            if act.grad is None:
-                print(f"[calculate_conductance] No gradient for {key}.")
-                continue
-            # Print out basic stats for debugging.
-            #print(f"[calculate_conductance] {key}: activation mean = {act.mean().item():.4f}, std = {act.std().item():.4f}")
-            #print(f"[calculate_conductance] {key}: grad mean = {act.grad.mean().item():.4f}, std = {act.grad.std().item():.4f}")
-            
-            B = act.shape[0] // (n_steps + 1)
-            new_shape = (n_steps + 1, B) + act.shape[1:]
-            acts = act.reshape(new_shape)
-            grads = act.grad.reshape(new_shape)
-            #print(f"[calculate_conductance] {key}: acts shape: {acts.shape}, grads shape: {grads.shape}")
-            
-            # For debugging, print the mean absolute difference and gradient in the first step.
-            diffs = acts[1:] - acts[:-1]
-            grad_seg = grads[:-1]
-            simple_attr = (acts[-1] * grads[-1]).mean(dim=0)
-            print("Simple attr last step mean:", simple_attr.mean().item())
-            #print(f"[calculate_conductance] {key}: mean absolute diff (step 0): {diffs[0].abs().mean().item():.4f}")
-            #print(f"[calculate_conductance] {key}: mean grad (step 0): {grad_seg[0].abs().mean().item():.4f}")
-            
-            # integrated = (diffs * grad_seg).sum(dim=0) / n_steps  # shape: [B, ...]
-            avg_conductance = (diffs * grad_seg).sum(dim=0).mean(dim=0)
-
-
-            #print(f"[calculate_conductance] {key}: integrated shape: {avg_conductance.shape}")
-            #avg_conductance = integrated.mean(dim=0)  # average over batch
-            #print(f"[calculate_conductance] {key}: avg_conductance: {avg_conductance}")
-            
-            if n_batches is None:
-                self.conductance[key] = avg_conductance
-            elif self.conductance[key] is None:
-                self.conductance[key] = avg_conductance / n_batches
-            else:
-                self.conductance[key] += avg_conductance / n_batches
-
-        self._saved.clear()
-        for h in self._hooks:
-            h.remove()
-        self._hooks = []
-
-    def update_dropout_masks(self, print_stats=True):
-        # Only try to print zeros if we actually got a tensor.
-        if 'fc1' in self.conductance and isinstance(self.conductance['fc1'], torch.Tensor):
-            #zeros_count = (self.conductance['fc1'] == 0).sum().item()
-            #print(f"Total conductance fc1: {self.conductance['fc1'].sum().item()}")
-            #print("Amount of zeros in conductance fc1:", zeros_count)
-            self.drop1.update_dropout_masks(self.conductance['fc1'], print_stats)
-        else:
-            print("Conductance for fc1 not available or not a tensor:", self.conductance.get('fc1'))
-        if 'fc2' in self.conductance and isinstance(self.conductance['fc2'], torch.Tensor):
-            #zeros_count = (self.conductance['fc2'] == 0).sum().item()
-            #print(f"Total conductance fc2:{self.conductance['fc2'].sum().item()}")
-
-            #print("Amount of zeros in conductance fc2:", zeros_count)
-            self.drop2.update_dropout_masks(self.conductance['fc2'], print_stats)
-        else:
-            print("Conductance for fc2 not available or not a tensor:", self.conductance.get('fc2'))
-        
-        self.conductance = {'fc1': None, 'fc2': None}
-        return
-
-
-
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
         # Create a detached copy of the model for IG computation.
-        # model_clone = copy.deepcopy(self)
-        # model_clone.to(device)
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
         model_clone.eval()  
-        model_clone.conductance = {'fc1': 0.0, 'fc2': 0.0}
+
+        #zero out scores
+        for drop,_ in model_clone.scores.items():
+            model_clone.scores[drop] = 0.0
+
         for batch in batches:
             x, _ = batch  # assuming batch is (samples, targets)
             x_captum = x.detach().clone().requires_grad_()
@@ -234,130 +108,57 @@ class CNN6_S1(nn.Module):
             baseline = torch.zeros_like(x_captum)
             outputs = model_clone(x_captum)
             pred = outputs.argmax(dim=1)
-            lc_fc1 = LayerConductance(model_clone, model_clone.relu1)
-            captum_attr_fc1 = lc_fc1.attribute(x_captum, baselines=baseline, target=pred,n_steps =model_clone.n_steps)
-            # Compute layer conductance for fc2 using the ReLU after fc2.
-            lc_fc2 = LayerConductance(model_clone, model_clone.relu2)
-            captum_attr_fc2 = lc_fc2.attribute(x_captum, baselines=baseline, target=pred,n_steps = model_clone.n_steps)
-            # Average out the conductance across the batch.
-            model_clone.conductance['fc1'] += captum_attr_fc1.mean(dim=0)
-            model_clone.conductance['fc2'] += captum_attr_fc2.mean(dim=0)
 
-            # avg_attr_fc1 = captum_attr_fc1.mean(dim=0)
-            # avg_attr_fc2 = captum_attr_fc2.mean(dim=0)
-            # print("Batch Captum conductance average for fc1:", avg_attr_fc1.sum().item())
-            # print("Batch Captum conductance average for fc2:", avg_attr_fc2.sum().item())
+            #calculate conductunce for batch
+            mlc = MultiLayerConductance(model_clone, model_clone.drop_layer_list)
+            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
+            # Average out the conductance across the batch and add it
+            for i, score in enumerate(captum_attrs):
+                model_clone.scores[f'drop_{i}'] += score.mean(dim=0)
 
-            # x, _ = batch  # assuming batch is (samples, targets)
-            # x = x.to(device, non_blocking=True)
-            # interp = model_clone.split_images(x, n_steps=model_clone.n_steps)
-            # B, steps, C, H, W = interp.shape
-            # interp_flat = interp.view(-1, C, H, W)
-            # out = model_clone.save_output_gradients(interp_flat, model_clone.n_steps)
-            # loss = out.sum()
-            # loss.backward()
-            # model_clone.calculate_conductance(n_steps=model_clone.n_steps, n_batches=n_batches)
-            # baseline = torch.zeros_like(x)
-            # output_diff = (model_clone(x) - model_clone(baseline)).sum().item()
-            # print(f"Model output difference: {output_diff:.4f}")
-            model_clone.update_dropout_masks(stats)
-            self.drop1.load_state_dict(model_clone.drop1.state_dict())
-            self.drop2.load_state_dict(model_clone.drop2.state_dict())
-            self.drop1.scaling = model_clone.drop1.scaling.detach().clone()
-            self.drop2.scaling = model_clone.drop2.scaling.detach().clone()
-            self.drop1.previous = model_clone.drop1.previous.detach().clone()
-            self.drop2.previous = model_clone.drop2.previous.detach().clone()
-            self.drop1.stats = model_clone.drop1.stats.copy()
-            self.drop2.stats = model_clone.drop2.stats.copy()
-            self.drop1.avg_scoring = model_clone.drop1.avg_scoring
-            self.drop2.avg_scoring = model_clone.drop2.avg_scoring
-            self.drop1.avg_dropout = model_clone.drop1.avg_dropout
-            self.drop2.avg_dropout = model_clone.drop2.avg_dropout
-            self.drop1.var_scoring = model_clone.drop1.var_scoring
-            self.drop2.var_scoring = model_clone.drop2.var_scoring
-            self.drop1.var_dropout = model_clone.drop1.var_dropout
-            self.drop2.var_dropout = model_clone.drop2.var_dropout
-            self.train()
-    def effecient_conductance_calculation(self, batches: Iterable, device: torch.device,stats = True) -> None:
+        #update the masks based on the scores
+        for i,_ in enumerate(model_clone.drop_list):
+            model_clone.drop_list[i].update_dropout_masks(model_clone.scores[f'drop_{i}'],stats)
 
-        model_clone = copy.deepcopy(self)
-        model_clone.to(device)
-        model_clone.eval()  # Make sure it’s in eval mode to freeze things like batchnorm statistics.
-        model_clone.conductance = {'fc1': 0.0, 'fc2': 0.0}
-        for batch in batches:
-            x, _ = batch  # assuming batch is (samples, targets)
-            x_captum = x.detach().clone().requires_grad_()
-            x_captum = x_captum.to(device, non_blocking=True)
-            # baseline = torch.zeros_like(x_captum)
-            # outputs = model_clone(x_captum)
-            # pred = outputs.argmax(dim=1)
-            # lc_fc1 = LayerConductance(model_clone, model_clone.relu1)
-            # captum_attr_fc1 = lc_fc1.attribute(x_captum, baselines=baseline, target=pred,n_steps =model_clone.n_steps)
-            # # Compute layer conductance for fc2 using the ReLU after fc2.
-            # lc_fc2 = LayerConductance(model_clone, model_clone.relu2)
-            # captum_attr_fc2 = lc_fc2.attribute(x_captum, baselines=baseline, target=pred,n_steps = model_clone.n_steps)
-            # # Average out the conductance across the batch.
-            # model_clone.conductance['fc1'] += captum_attr_fc1.mean(dim=0)
-            # model_clone.conductance['fc2'] += captum_attr_fc2.mean(dim=0)
-
-            interp = model_clone.split_images(x_captum, n_steps=model_clone.n_steps)
-            interp
-            B, steps, C, H, W = interp.shape
-            interp_flat = interp.view(-1, C, H, W)
-            out = model_clone.save_output_gradients(interp_flat, model_clone.n_steps)
-            loss = out.sum()
-            loss.backward()
-            model_clone.calculate_conductance(n_steps=model_clone.n_steps, n_batches=n_batches)
-            baseline = torch.zeros_like(x)
-            output_diff = (model_clone(x) - model_clone(baseline)).sum().item()
-            print(f"Model output difference: {output_diff:.4f}")
-            model_clone.update_dropout_masks(stats)
-
-        
-        # Now, copy the updated dropout mask parameters from model_clone back to self.
-        # (The exact code here depends on how MyDropout stores its mask/hyperparameters.)
-        self.drop1.load_state_dict(model_clone.drop1.state_dict())
-        self.drop2.load_state_dict(model_clone.drop2.state_dict())
-        self.drop1.scaling = model_clone.drop1.scaling.detach().clone()
-        self.drop2.scaling = model_clone.drop2.scaling.detach().clone()
-        self.drop1.previous = model_clone.drop1.previous.detach().clone()
-        self.drop2.previous = model_clone.drop2.previous.detach().clone()
-        self.drop1.stats = model_clone.drop1.stats.copy()
-        self.drop2.stats = model_clone.drop2.stats.copy()
-        self.drop1.avg_scoring = model_clone.drop1.avg_scoring
-        self.drop2.avg_scoring = model_clone.drop2.avg_scoring
-        self.drop1.avg_dropout = model_clone.drop1.avg_dropout
-        self.drop2.avg_dropout = model_clone.drop2.avg_dropout
-        self.drop1.var_scoring = model_clone.drop1.var_scoring
-        self.drop2.var_scoring = model_clone.drop2.var_scoring
-        self.drop1.var_dropout = model_clone.drop1.var_dropout
-        self.drop2.var_dropout = model_clone.drop2.var_dropout
+        #load the update on the model from the copy
+        for i,_ in enumerate(model_clone.drop_list):
+            self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
+            self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
+            self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
+            self.drop_list[i].stats = model_clone.drop_list[i].stats.copy()
+            self.drop_list[i].avg_scoring = model_clone.drop_list[i].avg_scoring
+            self.drop_list[i].avg_dropout = model_clone.drop_list[i].avg_dropout
+            self.drop_list[i].var_scoring = model_clone.drop_list[i].var_scoring
+            self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
         self.train()
-
-
+    
     def base_dropout(self):
-        self.drop1.base_dropout()
-        self.drop2.base_dropout()
+        for drop in self.drop_list:
+            drop.base_dropout()
+
     def custom_dropout(self):
-        self.drop1.custom_dropout()
-        self.drop2.custom_dropout()
+        for drop in self.drop_list:
+            drop.custom_dropout()
     def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
-        self.drop1.compute_and_plot_history_statistics(epoch_label+' fc1 ', save_dir)
-        self.drop2.compute_and_plot_history_statistics(epoch_label+" fc2 ", save_dir)
-    def plot_progression_statistics(self, save_dir=None):
-        self.drop1.plot_progression_statistics(save_dir,label = "fc1")
-        self.drop2.plot_progression_statistics(save_dir,label ="fc2")
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].compute_and_plot_history_statistics(epoch_label+f" fc{i}", save_dir)
+
+ 
+    def plot_progression_statistics(self, save_dir=None,label =''):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" drop{i}")
 
     def clear_update_history(self):
-        self.drop1.clear_update_history()
-        self.drop2.clear_update_history()
-    def check_dead_neurons(self, x):
-        with torch.no_grad():
-            activations = F.relu(self.fc1(self.flatten(self.pool(F.relu(self.bn2(self.conv2(
-                self.pool(F.relu(self.bn1(self.conv1(x)))))))))))
-            active_neurons = (activations > 0).float().mean().item()
-            print(f"Fraction of active fc1 neurons: {active_neurons:.4f}")
+        for drop in self.drop_list:
+            drop.clear_update_history()
+# \
+#     def check_dead_neurons(self, x):
+#         with torch.no_grad():
+#             activations = F.relu(self.fc1(self.flatten(self.pool(F.relu(self.bn2(self.conv2(
+#                 self.pool(F.relu(self.bn1(self.conv1(x)))))))))))
+#             active_neurons = (activations > 0).float().mean().item()
+#             print(f"Fraction of active fc1 neurons: {active_neurons:.4f}")
 
 
 
@@ -396,9 +197,6 @@ def get_args_parser():
     parser.add_argument('--resume', default='', type=str, help='Path to checkpoint to resume training or load a model')
     parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
     parser.add_argument('--mask_type', default='sigmoid', type=str, help='Type of mask for dropout')
-
-
-
 
     return parser
 
@@ -459,17 +257,13 @@ def main(args):
         best_acc = checkpoint['best_acc']
         history = checkpoint.get('history', {})
         if history:
-            drop1_history = history.get('drop1', {})
-            drop2_history = history.get('drop2', {})
-            model.drop1.avg_scoring = drop1_history.get('avg_scoring', [])
-            model.drop1.avg_dropout = drop1_history.get('avg_dropout', [])
-            model.drop1.var_scoring = drop1_history.get('var_scoring', [])
-            model.drop1.var_dropout = drop1_history.get('var_dropout', [])
-            
-            model.drop2.avg_scoring = drop2_history.get('avg_scoring', [])
-            model.drop2.avg_dropout = drop2_history.get('avg_dropout', [])
-            model.drop2.var_scoring = drop2_history.get('var_scoring', [])
-            model.drop2.var_dropout = drop2_history.get('var_dropout', [])
+            for i, drop in enumerate(model.drop_list):
+                drop_history = history.get(f'drop{i}', {})
+                drop.avg_scoring = drop_history.get('avg_scoring', [])
+                drop.avg_dropout = drop_history.get('avg_dropout', [])
+                drop.var_scoring = drop_history.get('var_scoring', [])
+                drop.var_dropout = drop_history.get('var_dropout', [])
+
     else:
         start_epoch = 0
         cumulative_train_time = 0.0
@@ -541,22 +335,14 @@ def main(args):
                 'best_acc': best_acc,  
             }
         if args.use_custom_dropout:
-            checkpoint['history'] = {
-                
-                'drop1': {
-                    'avg_scoring': model.drop1.avg_scoring,
-                    'avg_dropout': model.drop1.avg_dropout,
-                    'var_scoring': model.drop1.var_scoring,
-                    'var_dropout': model.drop1.var_dropout,
-                },
-                'drop2': {
-                    'avg_scoring': model.drop2.avg_scoring,
-                    'avg_dropout': model.drop2.avg_dropout,
-                    'var_scoring': model.drop2.var_scoring,
-                    'var_dropout': model.drop2.var_dropout,
-                }
-            }
-            
+            checkpoint['history'] = {}
+            for i, drop in enumerate(model.drop_list):
+                checkpoint['history'][f'drop{i}'] = {
+                    'avg_scoring': drop.avg_scoring,
+                    'avg_dropout': drop.avg_dropout,
+                    'var_scoring': drop.var_scoring,
+                    'var_dropout': drop.var_dropout,
+                }     
         torch.save(checkpoint, output_dir / "checkpoint.pth")
 
         # Save checkpoint if a new best accuracy is reached.

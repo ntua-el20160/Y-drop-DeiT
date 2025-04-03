@@ -24,44 +24,80 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 
 class MyDropout(nn.Module):
-    def __init__(self,elasticity = 1.0,p=0.1,num_channels=768,scaler =1.0,mask_type = "sigmoid"):
+    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid"):
         """
-        p_high: dropout probability for elements with a high score (score > split)
-        p_low: dropout probability for elements with a low score (score <= split)
-        elasticity: how quickly the dropout mask changes (0 = no change, 1 = immediate change)
-        mean_shift: how much to shift the split point from the median
-        p: standard dropout rate if needed
+        p: dropout probability.
+        elasticity: how quickly the dropout mask changes.
+        tied_layer: the module whose output is tied to this dropout.
+        scaler: scaling factor used in computing keep probability.
+        mask_type: determines which method to use for computing the keep probability.
         """
+
         super(MyDropout, self).__init__()
       
+
+        # self.register_buffer("previous", torch.full((num_channels,), 1 - p))
+        # self.register_buffer("scaling", torch.full((num_channels,), 1 - p))
+        # self.register_buffer("scoring", torch.zeros(num_channels))
+
+        #self.beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep), dtype=self.previous.dtype, device=self.previous.device))
+  
         self.p = p
         self.elasticity = elasticity
-        self.register_buffer("previous", torch.full((num_channels,), 1 - p))
-        self.register_buffer("scaling", torch.full((num_channels,), 1 - p))
-        # Optionally, if you want to register scoring (if needed)
-        self.register_buffer("scoring", torch.zeros(num_channels))
-        self.base = False
-        self.base_keep = 1 - p
         self.scaler = scaler
         self.mask_type = mask_type
-        # Initialize the beta parameter based on the base_keep value.
-        self.beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep), dtype=self.previous.dtype, device=self.previous.device))
-        # It will hold both per-update delta stats (if you wish) and raw history.
-        self.stats = {}
-        # Initialize history lists for raw scoring and dropout values.
-        self.stats["scoring_history"] = []  # List to hold raw scoring arrays per update.
-        self.stats["dropout_history"] = []  # List to hold raw dropout (keep probability) arrays per update.
+        self.base = False
+        self.base_keep = 1 - p
+        self.tied_layer = tied_layer  # Store the tied layer for reference.
+
+        # Buffers will be lazily initialized based on the tied layer's output.
+ 
+        self.initialized = False
+        self.beta = torch.tensor(0.0)
+
+        # History dictionaries.
+        self.stats = {"scoring_history": [], "dropout_history": []}
         self.avg_scoring = []
         self.avg_dropout = []
         self.var_scoring = []
         self.var_dropout = []
 
-
-
     
+    def initialize_buffers(self, feature_shape, device):
+        new_prev = torch.full(feature_shape, 1 - self.p, device=device)
+        new_scaling = torch.full(feature_shape, 1 - self.p, device=device)
+        new_scoring = torch.zeros(feature_shape, device=device)
+        new_beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep),
+                                            dtype=new_prev.dtype,
+                                            device=device))
+        # Check if the buffer 'previous' is already registered.
+        if "previous" not in self._buffers:
+            # Buffers not registered yet; register them.
+            self.register_buffer("previous", new_prev)
+            self.register_buffer("scaling", new_scaling)
+            self.register_buffer("scoring", new_scoring)
+        self.beta = new_beta
+        self.initialized = True
+
+
 
 
     def update_dropout_masks(self, scoring, stats=True):
+        """Update the dropout masks based on the scoring tensor.
+        scoring: a tensor of shape [channels] representing the scoring values.
+        stats: whether to save the scoring and dropout history.
+        Mask types:
+        -sigmoid:sigmoid around the dropout rate shifted by the scoring.
+        -sigmoid_mod: sigmoid with random noise on the final mask.
+        -softmax: softmax of the negative scoring multiplied by the number of channels and chosen dropout rate.
+        -softmax_renorm: softmax of the negative scoring multiplied by the number of channels and chosen dropout rate, renormalized to keep average near the set dropout rate.
+        -rank: rank of the scoring values, with a ramp from 1 to 0.
+        -inverse: inverse sigmoid for fine-tuning.
+        -dynamic_sigmoid: dynamic sigmoid based on the min and max of the scoring values.
+        """
+        
+
+
         # Normalize scoring
         if scoring.std() > 1e-6:
             normalized = (scoring - scoring.mean()) / scoring.std()
@@ -77,9 +113,8 @@ class MyDropout(nn.Module):
         elif self.mask_type == "sigmoid_mod":
             # Example smaller slope + random noise
             noise = 0.01 * torch.randn_like(normalized)
-            norm_noisy = normalized + noise
-            keep_prob = torch.sigmoid(self.beta - self.scaler * norm_noisy)
-            keep_prob = torch.clamp(keep_prob, min=0.2,max=0.95)
+            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)+ noise
+            keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
@@ -87,7 +122,19 @@ class MyDropout(nn.Module):
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.2, max=0.95)
+            keep_prob = raw_keep.clamp(min=0.3, max=0.95)
+
+        elif self.mask_type == "softmax_alt":
+            # Make sure scoring is not huge in magnitude.
+            probs = (-torch.softmax(scoring, dim=0)) +1
+
+            #normalize for average dropout rate close to p
+            raw_keep = probs * self.scaling.numel() * self.base_keep
+            keep_prob = raw_keep.clamp(min=0.3, max=0.95)
+        
+
+
+
 
         elif self.mask_type == "softmax_renorm":
             probs = torch.softmax(-scoring, dim=0)
@@ -96,7 +143,7 @@ class MyDropout(nn.Module):
             keep_prob = raw_keep.clamp(min=0.0, max=1.0)
             # optionally renormalize to keep average near self.base_keep
             keep_prob = keep_prob / keep_prob.mean() * self.base_keep
-            keep_prob = torch.clamp(keep_prob, min=0.2,max=0.95)
+            keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
 
         
         elif self.mask_type == "rank":
@@ -117,12 +164,12 @@ class MyDropout(nn.Module):
             current_mean = keep_prob.mean()
             if current_mean > 1e-6:
                 keep_prob = keep_prob / current_mean * self.base_keep
-            keep_prob = torch.clamp(keep_prob, min=0.2, max=0.95)
+            keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
         
         elif self.mask_type == "inverse":
             #inverse sigmoid for fine-tuning
             keep_prob = 1.0 - torch.sigmoid(normalized)
-            keep_prob = torch.clamp(keep_prob, 0.2, max=0.95)
+            keep_prob = torch.clamp(keep_prob, 0.3, max=0.95)
         
         elif self.mask_type == "dynamic_sigmoid":
             #Normalize scoring to [0, 1]
@@ -135,12 +182,12 @@ class MyDropout(nn.Module):
 
             # Apply sigmoid to get keep probability
             keep_prob = torch.sigmoid(scaled)
-            keep_prob = torch.clamp(keep_prob, 0.2, 0.95)
+            keep_prob = torch.clamp(keep_prob, 0.3, 0.95)
 
         else:
             # Fallback or default
             keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
-            keep_prob = torch.clamp(keep_prob, min=0.2, max=0.95)
+            keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
 
         # Step 3: Update scaling buffer and stats if needed
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:
@@ -157,8 +204,15 @@ class MyDropout(nn.Module):
 
 
     def forward(self, input):
+        
+        if not self.initialized:
+            feature_shape = input.shape[1:]  # Exclude the batch dimension.
+            self.initialize_buffers(feature_shape, input.device)
+
         if not self.training:
             return input
+        
+        #Initialuze buffers if not done yet
         if self.base or self.previous is None:
             mask = torch.empty_like(input).bernoulli_(self.base_keep)
             #print("Neuron amount",mask.shape)
@@ -404,10 +458,13 @@ class MyDropout(nn.Module):
 
 
     def reset_dropout_masks(self):
-        """Reset the dropout masks to None."""
-        self.previous = None
-        self.scaling = None
+        """Reset the dropout masks to their default values."""
+        if self.initialized:
+            # Instead of removing the buffers, reset them to the default (1 - p)
+            self.previous.fill_(1 - self.p)
+            self.scaling.fill_(1 - self.p)
         return
+
     def update_parameters(self,elasticity = None,p=None):
         """Update the hyperparameters of the custom dropout layer."""
         if elasticity is not None:
