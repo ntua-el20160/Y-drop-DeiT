@@ -52,8 +52,11 @@ class MyDropout(nn.Module):
 
         # Buffers will be lazily initialized based on the tied layer's output.
  
-        self.initialized = False
+        self.register_buffer("previous", torch.empty(0))
+        self.register_buffer("scaling", torch.empty(0))
+        self.register_buffer("scoring", torch.empty(0))
         self.beta = torch.tensor(0.0)
+        self.initialized = False
 
         # History dictionaries.
         self.stats = {"scoring_history": [], "dropout_history": []}
@@ -70,15 +73,32 @@ class MyDropout(nn.Module):
         new_beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep),
                                             dtype=new_prev.dtype,
                                             device=device))
-        # Check if the buffer 'previous' is already registered.
-        if "previous" not in self._buffers:
-            # Buffers not registered yet; register them.
-            self.register_buffer("previous", new_prev)
-            self.register_buffer("scaling", new_scaling)
-            self.register_buffer("scoring", new_scoring)
+        # Update the registered buffers.
+        self.previous = new_prev
+        self.scaling = new_scaling
+        self.scoring = new_scoring
         self.beta = new_beta
         self.initialized = True
-
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # For lazy-initialized buffers, if they are still empty, override them with the checkpoint values.
+        for key in ['previous', 'scaling', 'scoring']:
+            full_key = prefix + key
+            if full_key in state_dict:
+                checkpoint_val = state_dict[full_key]
+                current_val = getattr(self, key)
+                if current_val.numel() == 0:
+                    # Replace the uninitialized buffer with the checkpoint tensor.
+                    setattr(self, key, checkpoint_val)
+                    # Remove the key so that the parent's loader doesn't attempt to load it.
+                    del state_dict[full_key]
+        super(MyDropout, self)._load_from_state_dict(state_dict, prefix, local_metadata,
+                                                     strict, missing_keys, unexpected_keys, error_msgs)
+        # Remove our keys from missing_keys since we've already loaded them.
+        for key in ['previous', 'scaling', 'scoring']:
+            full_key = prefix + key
+            if full_key in missing_keys:
+                missing_keys.remove(full_key)
 
 
 
@@ -95,8 +115,6 @@ class MyDropout(nn.Module):
         -inverse: inverse sigmoid for fine-tuning.
         -dynamic_sigmoid: dynamic sigmoid based on the min and max of the scoring values.
         """
-        
-
 
         # Normalize scoring
         if scoring.std() > 1e-6:

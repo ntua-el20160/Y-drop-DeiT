@@ -49,21 +49,19 @@ class CNN6_S1(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)
         
         # Use MyDropout for fc1 and fc2 outputs.
-        self.drop_layer_list = [self.relu1, self.relu2]
-        self.drop_list =[]
-
+        self.selected_layers = [self.relu1, self.relu2]
         if use_custom_dropout:
-            self.scores ={}
-            for i,layer in enumerate(self.drop_layer_list):
-                self.drop_list.append(MyDropout(elasticity=elasticity, p=p, tied_layer=layer,mask_type = mask_type, scaler = scaler))
-                self.scores[f"drop_{i}"] = None
+            self.drop_list = nn.ModuleList([
+                MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler)
+                for layer in self.selected_layers
+            ])
         else:
-            for layer in self.drop_layer_list:
-                self.drop_list.append(nn.Dropout(p))
+            self.drop_list = nn.ModuleList([nn.Dropout(p) for _ in self.selected_layers])
+        self.scores ={}
         
         
     def forward(self, x):
-        # Convolutional layers.
+        # Convolutional layers
         x = self.conv1(x)
         x = F.relu(self.bn1(x))
         x = self.pool(x)
@@ -71,46 +69,45 @@ class CNN6_S1(nn.Module):
         x = F.relu(self.bn2(x))
         x = self.pool(x)
         
-        # Flatten.
+        # Flatten
         x = self.flatten(x)  # Shape: [B, 4096]
         
-        # fc1: raw output, then ReLU, then dropout.
-        pre_fc1 = self.fc1(x)
-        # Save pre-activation if needed for integrated gradients:
-        x1 = self.relu1(pre_fc1)  # This is the post-ReLU activation for fc1.
-
-
-        x1 = self.drop_list[0](x1)
+        # FC1 with dropout
+        x = self.fc1(x)
+        x = self.selected_layers[0](x)  # relu1
+        x = self.drop_list[0](x)
         
-        # fc2: raw output, then ReLU, then dropout.
-        pre_fc2 = self.fc2(x1)
-        x2 = self.relu2(pre_fc2)  # Post-ReLU activation for fc2.
-        x2 = self.drop_list[1](x2)
+        # FC2 with dropout
+        x = self.fc2(x)
+        x = self.selected_layers[1](x)  # relu2
+        x = self.drop_list[1](x)
         
-        # Final classification layer.
-        out = self.fc3(x2)
-        return out
+        # Output layer
+        x = self.fc3(x)
+        return x
 
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
         model_clone.eval()  
-
-        #zero out scores
-        for drop,_ in model_clone.scores.items():
-            model_clone.scores[drop] = 0.0
+        
+        # Initialize conductances for each layer
+        for i, _ in enumerate(self.selected_layers):
+            model_clone.scores[f'drop_{i}'] = 0.0
 
         for batch in batches:
-            x, _ = batch  # assuming batch is (samples, targets)
+            x, _ = batch  # Batch is (samples, targets)
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
+
+            # Get model predictions
             outputs = model_clone(x_captum)
             pred = outputs.argmax(dim=1)
 
             #calculate conductunce for batch
-            mlc = MultiLayerConductance(model_clone, model_clone.drop_layer_list)
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
             captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
@@ -120,6 +117,13 @@ class CNN6_S1(nn.Module):
         #update the masks based on the scores
         for i,_ in enumerate(model_clone.drop_list):
             model_clone.drop_list[i].update_dropout_masks(model_clone.scores[f'drop_{i}'],stats)
+        # Update the dropout masks based on the accumulated conductances
+        for i, drop_layer in enumerate(model_clone.drop_list):
+            drop_layer.update_dropout_masks(
+                model_clone.scores[f'drop_{i}'],
+                stats=stats
+            )
+
 
         #load the update on the model from the copy
         for i,_ in enumerate(model_clone.drop_list):
