@@ -325,6 +325,9 @@ class MyDropout(nn.Module):
         # Heatmap for running scoring mean.
         if self.running_scoring_mean is not None:
             scoring_mean_np = self.running_scoring_mean.cpu().numpy()
+            if scoring_mean_np.ndim == 3:
+                C, H, W = scoring_mean_np.shape
+                scoring_mean_np = scoring_mean_np.reshape(C * H, W)
             im0 = axs[1, 0].imshow(scoring_mean_np, aspect='auto', cmap='viridis')
             axs[1, 0].set_title(f"{epoch_label} - Mean Scoring per Neuron")
             fig.colorbar(im0, ax=axs[1, 0])
@@ -334,6 +337,9 @@ class MyDropout(nn.Module):
         # Heatmap for running keep probability mean.
         if self.running_dropout_mean is not None:
             dropout_mean_np = self.running_dropout_mean.cpu().numpy()
+            if dropout_mean_np.ndim == 3:
+                C, H, W = dropout_mean_np.shape
+                dropout_mean_np = dropout_mean_np.reshape(C * H, W)
             im1 = axs[1, 1].imshow(dropout_mean_np, aspect='auto', cmap='magma')
             axs[1, 1].set_title(f"{epoch_label} - Mean Keep Rate per Neuron")
             fig.colorbar(im1, ax=axs[1, 1])

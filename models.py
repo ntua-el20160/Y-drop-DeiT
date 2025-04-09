@@ -119,11 +119,14 @@ class MyVisionTransformer(VisionTransformer):
             self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
             self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
             self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
-            self.drop_list[i].stats = model_clone.drop_list[i].stats.copy()
-            self.drop_list[i].avg_scoring = model_clone.drop_list[i].avg_scoring
-            self.drop_list[i].avg_dropout = model_clone.drop_list[i].avg_dropout
-            self.drop_list[i].var_scoring = model_clone.drop_list[i].var_scoring
-            self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
+            self.drop_list[i].running_scoring_mean = model_clone.drop_list[i].running_scoring_mean
+            self.drop_list[i].running_dropout_mean = model_clone.drop_list[i].running_dropout_mean
+            self.drop_list[i].keep_hist = model_clone.drop_list[i].keep_hist
+            self.drop_list[i].scoring_hist = model_clone.drop_list[i].scoring_hist
+            self.drop_list[i].progression_scoring = model_clone.drop_list[i].progression_scoring
+            self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
+            self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
+            self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
         print("Memory allocated:", torch.cuda.memory_allocated(device))
         print("Max memory reserved:", torch.cuda.max_memory_reserved(device))    
         del model_clone
