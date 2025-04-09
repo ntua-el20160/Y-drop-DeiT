@@ -409,12 +409,12 @@ def main(args):
         test_acc = test_stats.get('acc1', 0.0)
         test_loss = test_stats.get('loss', 0.0)
         
-        if args.ydrop:
-            model.compute_statistics(stats=True)
+        if check:
+            model.update_progression()
             if stats:
                 model.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.compute_and_plot_history_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
-            model.clear_update_history()
+                model.plot_aggregated_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
+            model.clear_progression()
         
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)

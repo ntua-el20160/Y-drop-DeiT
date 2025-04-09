@@ -55,15 +55,15 @@ class MyVisionTransformer(VisionTransformer):
         for drop in self.drop_list:
             drop.use_ydrop()
 
-    def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
+    def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         for i,_ in enumerate(self.drop_list):
             block_num = i//4
             layer_num = i%4 
-            self.drop_list[i].compute_and_plot_history_statistics(epoch_label+f" Block {block_num} layer{layer_num}", save_dir)
+            self.drop_list[i].plot_aggregated_statistics(epoch_label+f" Block {block_num} layer{layer_num}", save_dir)
 
-    def compute_statistics(self):
+    def update_progression(self):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].compute_statistics(stats=True)
+            self.drop_list[i].update_progression()
  
     def plot_progression_statistics(self, save_dir=None,label =''):
         for i,_ in enumerate(self.drop_list):
@@ -71,9 +71,9 @@ class MyVisionTransformer(VisionTransformer):
             layer_num = i%4
             self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" Block_{block_num}_layer_{layer_num}")
 
-    def clear_update_history(self):
+    def clear_progression(self):
         for drop in self.drop_list:
-            drop.clear_update_history()
+            drop.clear_progression()
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
@@ -124,6 +124,11 @@ class MyVisionTransformer(VisionTransformer):
             self.drop_list[i].avg_dropout = model_clone.drop_list[i].avg_dropout
             self.drop_list[i].var_scoring = model_clone.drop_list[i].var_scoring
             self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
+        print("Memory allocated:", torch.cuda.memory_allocated(device))
+        print("Max memory reserved:", torch.cuda.max_memory_reserved(device))    
+        del model_clone
+        torch.cuda.empty_cache()
+
         self.train()
 
 

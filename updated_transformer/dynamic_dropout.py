@@ -58,12 +58,20 @@ class MyDropout(nn.Module):
         self.beta = torch.tensor(0.0)
         self.initialized = False
 
-        # History dictionaries.
-        self.stats = {"scoring_history": [], "dropout_history": []}
-        self.avg_scoring = []
-        self.avg_dropout = []
-        self.var_scoring = []
-        self.var_dropout = []
+        # Aggregated statistics for updating without keeping full history:
+        self.n_updates = 0  # Number of updates processed.
+        self.running_scoring_mean = None  # Running (per-neuron) average of scoring.
+        self.running_dropout_mean = None  # Running (per-neuron) average of keep probability.
+        
+        # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
+        self.scoring_hist = np.zeros(50)  
+        self.keep_hist = np.zeros(50)
+        
+        # For progression statistics (one scalar per update).
+        self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
+        self.sum_keep = None     # Cumulative sum to compute overall average keep probability.
+        self.progression_scoring = []  # List of overall average scoring per update.
+        self.progression_keep = []     # List of overall average keep probability per update.
 
     
     def initialize_buffers(self, feature_shape, device):
@@ -79,47 +87,7 @@ class MyDropout(nn.Module):
         self.scoring = new_scoring
         self.beta = new_beta
         self.initialized = True
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        # For lazy-initialized buffers, if they are still empty, override them with the checkpoint values.
-        for key in ['previous', 'scaling', 'scoring']:
-            full_key = prefix + key
-            if full_key in state_dict:
-                checkpoint_val = state_dict[full_key]
-                current_val = getattr(self, key)
-                if current_val.numel() == 0:
-                    # Replace the uninitialized buffer with the checkpoint tensor.
-                    setattr(self, key, checkpoint_val)
-                    # Remove the key so that the parent's loader doesn't attempt to load it.
-                    del state_dict[full_key]
-        super(MyDropout, self)._load_from_state_dict(state_dict, prefix, local_metadata,
-                                                     strict, missing_keys, unexpected_keys, error_msgs)
-        # Remove our keys from missing_keys since we've already loaded them.
-        for key in ['previous', 'scaling', 'scoring']:
-            full_key = prefix + key
-            if full_key in missing_keys:
-                missing_keys.remove(full_key)
 
-    def update_hyperparameters(self,elasticity = None,p=None,tied_layer: Optional[nn.Module] = None,scaler =None,mask_type = None):
-        """
-        Update the hyperparameters of the custom dropout layer.
-        elasticity: how quickly the dropout mask changes.
-        p: dropout probability.
-        tied_layer: the module whose output is tied to this dropout.
-        scaler: scaling factor used in computing keep probability.
-        mask_type: determines which method to use for computing the keep probability.
-        """
-        if elasticity is not None:
-            self.elasticity = elasticity
-        if p is not None:
-            self.base_keep = 1 - p
-            self.p = p
-        if tied_layer is not None:
-            self.tied_layer = tied_layer
-        if mask_type is not None:
-            self.mask_type = mask_type
-        if scaler is not None:
-            self.scaler = scaler
 
 
     def update_dropout_masks(self, scoring, stats=True):
@@ -231,8 +199,9 @@ class MyDropout(nn.Module):
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:
             self.scaling = torch.full_like(keep_prob, self.base_keep)
         
+
         if stats:
-            self.append_history(scoring, keep_prob)
+            self.update_aggregated_statistics(scoring, keep_prob)
 
         # Momentum-like update
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
@@ -264,238 +233,195 @@ class MyDropout(nn.Module):
             #print("Amount of zeroes in mask: ",torch.sum(mask == 0))
 
             return mask * input / (self.scaling)
-        
-    def append_history(self, scoring, dropout):
+    def update_aggregated_statistics(self, scoring, keep_prob):
         """
-        Save the current raw scoring and dropout (keep probability) values
-        into the history lists.
-        - scoring: a tensor of shape [channels]
-        - dropout: a tensor of shape [channels] (new keep probabilities)
+        Update incremental (running) aggregated statistics with the new scoring and keep_prob values.
+        This replaces storing all raw histories.
+        It updates:
+          - running_scoring_mean (per neuron)
+          - running_dropout_mean (per neuron)
+          - cumulative histograms for scoring and dropout over fixed bins.
         """
-        # Convert tensors to NumPy arrays and append a copy to the history lists.
- 
-        self.stats["scoring_history"].append(scoring.detach().cpu().numpy().copy())
-        self.stats["dropout_history"].append(dropout.detach().cpu().numpy().copy())
-    def compute_statistics(self,stats = True):
-        scoring_hist = np.stack(self.stats["scoring_history"], axis=0)
-        dropout_hist = np.stack(self.stats["dropout_history"], axis=0)
-        score_mean = scoring_hist.sum()
-        dropout_mean = dropout_hist.mean()
-        score_var = scoring_hist.var()
-        dropout_var = dropout_hist.var()
+        # a) Detach and convert to CPU numpy arrays.
 
-        self.avg_dropout.append(dropout_mean)
-        self.avg_scoring.append(score_mean)
-        self.var_dropout.append(dropout_var)
-        self.var_scoring.append(score_var)
-        print("Scoring Sum: ",score_mean)
-        print("Scoring Variance: ",score_var)
-        print("Keep Rate Mean: ",dropout_mean)
-        print("Keep Rate Variance: ",dropout_var)
-    def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
+        scoring_det = scoring.detach().cpu().float()
+        keep_prob_det = keep_prob.detach().cpu().float()
+        
+        
+        # b) Update running means per neuron.
+        if self.running_scoring_mean is None:
+            self.running_scoring_mean = scoring_det.clone()
+            self.running_dropout_mean = keep_prob_det.clone()
+        else:
+            self.running_scoring_mean = (self.running_scoring_mean * self.n_updates + scoring_det) / (self.n_updates + 1)
+            self.running_dropout_mean = (self.running_dropout_mean * self.n_updates + keep_prob_det) / (self.n_updates + 1)
+        
+        current_sum_scoring = scoring_det.sum().item()
+        
+        # d) Update cumulative sums
+        if self.sum_scoring is None:
+            self.sum_scoring = current_sum_scoring
+        else:
+            self.sum_scoring += current_sum_scoring
+
+        # Update histograms.
+        bins_scoring = np.linspace(-2, 2, 51)  # 50 bins => 51 edges.
+        hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
+        self.scoring_hist += hist_scoring
+        
+        bins_keep = np.linspace(0, 1, 51)
+        hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
+        self.keep_hist += hist_keep
+        
+        # Increment the update counter.
+        self.n_updates += 1
+        
+       
+    def update_progression(self):
+        if self.sum_scoring is not None and self.running_dropout_mean is not None:
+            self.progression_keep.append(self.running_dropout_mean.mean().item())
+            self.progression_scoring.append(self.sum_scoring)
+    def clear_progression(self):
+        """Clear the progression statistics."""
+        self.n_updates = 0  # Number of updates processed.
+        self.running_scoring_mean = None  # Running (per-neuron) average of scoring.
+        self.running_dropout_mean = None  # Running (per-neuron) average of keep probability.
+        
+        # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
+        self.scoring_hist = np.zeros(50)  
+        self.keep_hist = np.zeros(50)
+        
+        # For progression statistics (one scalar per update).
+        self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
+        self.sum_keep = None    
+    def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         """
-        Compute per-channel statistics from the saved history and generate two figures:
-        
-        For both scoring and dropout, the figure will have 4 subplots:
-        - Top-left: Heatmap of per-channel mean values.
-        - Top-right: Heatmap of per-channel variance.
-        - Bottom-left: Histogram of the overall (flattened) distribution.
-        - Bottom-right: Heatmap of per-channel range (max - min).
-        
-        Parameters:
-        - epoch_label: A string (e.g. "epoch_5") used in titles and filenames.
-        - save_dir: Optional directory to save the plots.
+        Plot the aggregated statistics:
+         • Two histograms:
+              - Scoring histogram (50 bins, fixed range -5 to 5).
+              - Keep probability histogram (50 bins, fixed range 0 to 1).
+         • Two heatmaps:
+              - Running per-neuron average scoring.
+              - Running per-neuron average keep probability.
         """
-
-
-        # Check if history is available.
-        if len(self.stats["scoring_history"]) == 0 or len(self.stats["dropout_history"]) == 0:
-            print("No history recorded yet.")
-            return
-
-        # Stack the history arrays along a new axis.
-        # This will give arrays of shape: [num_updates, ...channel_dims...]
-        scoring_hist = np.stack(self.stats["scoring_history"], axis=0)
-        dropout_hist = np.stack(self.stats["dropout_history"], axis=0)
-
-        # Define a helper that computes per-channel statistics.
-        # It will compute mean, variance, min, max, and range along axis 0 (over updates),
-        # leaving the channel dimensions intact.
-        def compute_stats(history):
-            # Compute the mean along the update axis.
-            mean_val = np.mean(history, axis=0)
-            var_val = np.var(history, axis=0)
-            min_val = np.min(history, axis=0)
-            max_val = np.max(history, axis=0)
-            range_val = max_val - min_val
-            return mean_val, var_val, min_val, max_val, range_val
-
-        # Compute statistics for scoring and dropout.
-        mean_scoring, var_scoring, min_scoring, max_scoring, range_scoring = compute_stats(scoring_hist)
-        mean_dropout, var_dropout, min_dropout, max_dropout, range_dropout = compute_stats(dropout_hist)
-
-        # Define a helper function for plotting a 1D or 2D metric as a heatmap.
-        def plot_metric_heatmap(metric, title, cmap='viridis'):
-            """
-            Plot the metric as a heatmap.
-            If the metric is 1D, reshape it into a 1-row heatmap.
-            """
-            # If metric is 1D, reshape it to (1, num_channels)
-            if metric.ndim == 1:
-                grid = metric.reshape(1, -1)
-            else:
-                grid = metric  # assume already 2D or more
-            plt.imshow(grid, cmap=cmap, aspect='auto')
-            plt.title(title)
-            plt.colorbar()
-            # Optionally, add annotations if the grid is small (for clarity).
-            if grid.size <= 100:
-                nrows, ncols = grid.shape
-                for i in range(nrows):
-                    for j in range(ncols):
-                        plt.text(j, i, f"{grid[i, j]:.2f}", ha="center", va="center", color="w", fontsize=8)
-
-        # ------------------
-        # Figure for Scoring Statistics
-        # ------------------
-        plt.figure(figsize=(12, 10))
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
         
-        # Subplot 1: Per-channel mean as a heatmap.
-        plt.subplot(2, 2, 1)
-        plot_metric_heatmap(mean_scoring, f"{epoch_label} - Scoring Mean", cmap='viridis')
+        # Histogram for scoring.
+        bins_scoring = np.linspace(-5, 5, 51)
+        bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
+        axs[0, 0].bar(bin_centers_scoring, self.scoring_hist, width=(bins_scoring[1]-bins_scoring[0]))
+        axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
+        axs[0, 0].set_xlabel("Scoring")
+        axs[0, 0].set_ylabel("Count")
         
-        # Subplot 2: Per-channel variance as a heatmap.
-        plt.subplot(2, 2, 2)
-        plot_metric_heatmap(var_scoring, f"{epoch_label} - Scoring Variance", cmap='viridis')
+        # Histogram for keep probability.
+        bins_keep = np.linspace(0, 1, 51)
+        bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
+        axs[0, 1].bar(bin_centers_keep, self.keep_hist, width=(bins_keep[1]-bins_keep[0]))
+        axs[0, 1].set_title(f"{epoch_label} - Keep Probability Histogram")
+        axs[0, 1].set_xlabel("Keep Probability")
+        axs[0, 1].set_ylabel("Count")
         
-        # Subplot 3: Histogram of overall scoring distribution.
-        plt.subplot(2, 2, 3)
-        plt.hist(scoring_hist.flatten(), bins=50, color='skyblue', edgecolor='black')
-        plt.title(f"{epoch_label} - Overall Scoring Distribution")
-        plt.xlabel("Scoring Value")
-        plt.ylabel("Frequency")
+        # Heatmap for running scoring mean.
+        if self.running_scoring_mean is not None:
+            scoring_mean_np = self.running_scoring_mean.cpu().numpy()
+            im0 = axs[1, 0].imshow(scoring_mean_np, aspect='auto', cmap='viridis')
+            axs[1, 0].set_title(f"{epoch_label} - Mean Scoring per Neuron")
+            fig.colorbar(im0, ax=axs[1, 0])
+        else:
+            axs[1, 0].text(0.5, 0.5, "No Data", ha="center", va="center")
         
-        # Subplot 4: Per-channel range (max - min) as a heatmap.
-        plt.subplot(2, 2, 4)
-        plot_metric_heatmap(range_scoring, f"{epoch_label} - Scoring Range", cmap='viridis')
+        # Heatmap for running keep probability mean.
+        if self.running_dropout_mean is not None:
+            dropout_mean_np = self.running_dropout_mean.cpu().numpy()
+            im1 = axs[1, 1].imshow(dropout_mean_np, aspect='auto', cmap='magma')
+            axs[1, 1].set_title(f"{epoch_label} - Mean Keep Rate per Neuron")
+            fig.colorbar(im1, ax=axs[1, 1])
+        else:
+            axs[1, 1].text(0.5, 0.5, "No Data", ha="center", va="center")
         
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, f"{epoch_label}_scoring_stats.png"))
-        #plt.show()
-        
-        # ------------------
-        # Figure for Dropout Statistics
-        # ------------------
-        plt.figure(figsize=(12, 10))
-        
-        # Subplot 1: Per-channel mean for dropout as a heatmap.
-        plt.subplot(2, 2, 1)
-        plot_metric_heatmap(mean_dropout, f"{epoch_label} - Keep Rate Mean", cmap='magma')
-        
-        # Subplot 2: Per-channel variance for dropout as a heatmap.
-        plt.subplot(2, 2, 2)
-        plot_metric_heatmap(var_dropout, f"{epoch_label} - Keep Rate Variance", cmap='magma')
-        
-        # Subplot 3: Histogram of overall dropout distribution.
-        plt.subplot(2, 2, 3)
-        dropout_data = dropout_hist.flatten()  # Use dropout_hist, not scoring_hist
-        dropout_upper = np.percentile(dropout_data, 100)
-        plt.hist(dropout_data, bins=50, range=(dropout_data.min(), dropout_upper), color='skyblue', edgecolor='black')
-        plt.title(f"{epoch_label} - Overall Dropout Distribution (Zoomed)")
-        plt.xlabel("Keep Probability")
-        plt.ylabel("Frequency")
+            fig.savefig(os.path.join(save_dir, f"{epoch_label}_aggregated_stats.png"))
+        plt.close(fig)   
+    
 
+    def plot_progression_statistics(self, save_dir=None, label="progression"):
+        """
+        Plot the progression of overall averages over updates.
+        This function creates a 2×1 plot:
+         • Top subplot: progression of overall average scoring.
+         • Bottom subplot: progression of overall average keep probability.
+         
+        The x-axis shows the update number, and the y-axis shows the corresponding progression value.
+        """
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+        updates = np.arange(1, len(self.progression_scoring) + 1)
         
-        # Subplot 4: Per-channel range (max - min) for dropout as a heatmap.
-        plt.subplot(2, 2, 4)
-        plot_metric_heatmap(range_dropout, f"{epoch_label} - Keep Rate Range", cmap='magma')
+        # Plot progression for scoring.
+        axs[0].plot(updates, self.progression_scoring, marker='o', linestyle='-')
+        axs[0].set_title("Overall Scoring Sum over an Epoch Progression")
+        axs[0].set_xlabel("Update Number")
+        axs[0].set_ylabel("Scoring Sum")
+        axs[0].grid(True)
+        
+        # Plot progression for keep probability.
+        axs[1].plot(updates, self.progression_keep, marker='o', linestyle='-')
+        axs[1].set_title("Overall Average Keep Probability over an Epoch Progression")
+        axs[1].set_xlabel("Update Number")
+        axs[1].set_ylabel("Average Keep Probability")
+        axs[1].grid(True)
         
         plt.tight_layout()
-        if save_dir is not None:
-            plt.savefig(os.path.join(save_dir, f"{epoch_label}_dropout_stats.png"))
-        #plt.show()
-
-    def clear_update_history(self):
-        """
-        Clears the raw history of scoring and dropout values.
-        """
-        self.stats["scoring_history"] = []
-        self.stats["dropout_history"] = []
-        # Optionally, clear aggregated statistics if stored.
-        keys_to_clear = ["scoring_per_channel_mean", "scoring_per_channel_var",
-                        "scoring_per_channel_min", "scoring_per_channel_max",
-                        "dropout_per_channel_mean", "dropout_per_channel_var",
-                        "dropout_per_channel_min", "dropout_per_channel_max"]
-        for key in keys_to_clear:
-            self.stats.pop(key, None)
-        print("Update history has been cleared.")
-    def plot_progression_statistics(self, save_dir=None,label=None):
-        """
-        Plot the progression of scoring and dropout statistics over updates.
-        Creates a 2x2 grid of subplots:
-          - Top-left: Scoring Mean progression.
-          - Top-right: Scoring Variance progression.
-          - Bottom-left: Dropout Mean progression.
-          - Bottom-right: Dropout Variance progression.
-          
-        Parameters:
-        - save_dir: Optional directory where the plot will be saved.
-        """
-        import matplotlib.pyplot as plt
-        import os
-        # Create a new figure.
-        plt.figure(figsize=(12, 10))
-
-        # Create x-axis values (update numbers).
-        updates = list(range(1, len(self.avg_scoring) + 1))
-        
-        # Subplot 1: Scoring Mean Progression.
-        plt.subplot(2, 2, 1)
-        plt.plot(updates, self.avg_scoring, marker='o', linestyle='-')
-        plt.title("Scoring Sum Progression")
-        plt.xlabel("Update")
-        plt.ylabel("Scoring Sum")
-        plt.grid(True)
-
-        # Subplot 2: Scoring Variance Progression.
-        plt.subplot(2, 2, 2)
-        plt.plot(updates, self.var_scoring, marker='o', linestyle='-')
-        plt.title("Scoring Variance Progression")
-        plt.xlabel("Update")
-        plt.ylabel("Scoring Variance")
-        plt.grid(True)
-
-        # Subplot 3: Dropout Mean Progression.
-        plt.subplot(2, 2, 3)
-        plt.plot(updates, self.avg_dropout, marker='o', linestyle='-')
-        plt.title("Keep Rate Mean Progression")
-        plt.xlabel("Update")
-        plt.ylabel("Keep Rate Mean")
-        plt.grid(True)
-
-        # Subplot 4: Dropout Variance Progression.
-        plt.subplot(2, 2, 4)
-        plt.plot(updates, self.var_dropout, marker='o', linestyle='-')
-        plt.title("Keep Rate Variance Progression")
-        plt.xlabel("Update")
-        plt.ylabel("Keep Rate Variance")
-        plt.grid(True)
-
-        plt.tight_layout()
-        
-        # Save the plot if a save directory is provided.
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plot_path = os.path.join(save_dir, label +"_progression_stats.png")
-            plt.savefig(plot_path)
-            print(f"Progression statistics plot saved to {plot_path}")
-        # Optionally, you can display the plot.
-        # plt.show()
-        plt.close()
+            fig.savefig(os.path.join(save_dir, f"{label}_progression.png"))
+            print(f"Progression plot saved to {os.path.join(save_dir, f'{label}_progression.png')}")
+        plt.close(fig)
 
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # For lazy-initialized buffers, if they are still empty, override them with the checkpoint values.
+        for key in ['previous', 'scaling', 'scoring']:
+            full_key = prefix + key
+            if full_key in state_dict:
+                checkpoint_val = state_dict[full_key]
+                current_val = getattr(self, key)
+                if current_val.numel() == 0:
+                    # Replace the uninitialized buffer with the checkpoint tensor.
+                    setattr(self, key, checkpoint_val)
+                    # Remove the key so that the parent's loader doesn't attempt to load it.
+                    del state_dict[full_key]
+        super(MyDropout, self)._load_from_state_dict(state_dict, prefix, local_metadata,
+                                                     strict, missing_keys, unexpected_keys, error_msgs)
+        # Remove our keys from missing_keys since we've already loaded them.
+        for key in ['previous', 'scaling', 'scoring']:
+            full_key = prefix + key
+            if full_key in missing_keys:
+                missing_keys.remove(full_key)
+
+    def update_hyperparameters(self,elasticity = None,p=None,tied_layer: Optional[nn.Module] = None,scaler =None,mask_type = None):
+        """
+        Update the hyperparameters of the custom dropout layer.
+        elasticity: how quickly the dropout mask changes.
+        p: dropout probability.
+        tied_layer: the module whose output is tied to this dropout.
+        scaler: scaling factor used in computing keep probability.
+        mask_type: determines which method to use for computing the keep probability.
+        """
+        if elasticity is not None:
+            self.elasticity = elasticity
+        if p is not None:
+            self.base_keep = 1 - p
+            self.p = p
+        if tied_layer is not None:
+            self.tied_layer = tied_layer
+        if mask_type is not None:
+            self.mask_type = mask_type
+        if scaler is not None:
+            self.scaler = scaler
 
     def reset_dropout_masks(self):
         """Reset the dropout masks to their default values."""
@@ -505,15 +431,6 @@ class MyDropout(nn.Module):
             self.scaling.fill_(1 - self.p)
         return
 
-    def update_parameters(self,elasticity = None,p=None):
-        """Update the hyperparameters of the custom dropout layer."""
-        if elasticity is not None:
-            self.elasticity = elasticity
-        if p is not None:
-            self.p = p
-            self.base_keep = 1 - p
-            self.beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep), dtype=self.previous.dtype, device=self.previous.device))
-        return
     def use_normal_dropout(self):
         """Use the standard dropout."""
         self.base = True

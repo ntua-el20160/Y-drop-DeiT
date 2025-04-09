@@ -34,7 +34,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 1
+    print_freq = 200
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
