@@ -137,13 +137,13 @@ class CNN6_S1(nn.Module):
             self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
         self.train()
     
-    def base_dropout(self):
+    def use_normal_dropout(self):
         for drop in self.drop_list:
-            drop.base_dropout()
+            drop.use_normal_dropout()
 
-    def custom_dropout(self):
+    def use_ydrop(self):
         for drop in self.drop_list:
-            drop.custom_dropout()
+            drop.use_ydrop()
     def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
         for i,_ in enumerate(self.drop_list):
             self.drop_list[i].compute_and_plot_history_statistics(epoch_label+f" fc{i}", save_dir)
@@ -174,10 +174,11 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda', type=str, help='Device to use for training (cuda or cpu)')
     parser.add_argument('--seed', default=42, type=int, help='Random seed')
     parser.add_argument('--output_dir', default='./output', type=str, help='Directory to save checkpoints and logs')
-    parser.add_argument('--use_custom_dropout', action='store_true', default=True,
-                        help='Enable custom dropout (MyDropout) instead of standard dropout')
-    parser.add_argument('--no_custom_dropout', action='store_false', dest='use_custom_dropout',
+    parser.add_argument('--use_ydrop', action='store_true', default=True,
+                        help='Enable Y-Drop (MyDropout) instead of standard dropout')
+    parser.add_argument('--no_ydrop', action='store_false', dest='use_custom_dropout',
                         help='Disable custom dropout')
+    parser.set_defaults(ydrop=True)
     parser.add_argument('--data-path', default='/datasets01_101/imagenet_full_size/061417/', type=str,
                         help='dataset path')
     parser.add_argument('--data-set', default='IMNET', choices=['CIFAR10','CIFAR100', 'IMNET', 'INAT', 'INAT19'],
@@ -195,7 +196,6 @@ def get_args_parser():
                          help ='intermediate steps for conductance calculation')
     parser.add_argument('--update_freq',type=int,default = 1,
                             help ='intermediate steps for conductance calculation')
-    parser.add_argument('--input-size', default=32, type=int, help='images input size')
     parser.add_argument('--experiment_name', default='simplecnnmlp', type=str, help='experiment name')
     parser.add_argument('--plot_freq', default=5, type=int, help='plot frequency')
     parser.add_argument('--resume', default='', type=str, help='Path to checkpoint to resume training or load a model')
@@ -272,6 +272,7 @@ def main(args):
         start_epoch = 0
         cumulative_train_time = 0.0
         best_acc = 0.0
+        
     
     
     print("Start training")
@@ -279,16 +280,17 @@ def main(args):
     best_loss = float('inf')
     #initially normal dropout
     loss_scaler = NativeScaler()
-    if args.use_custom_dropout:
-        model.base_dropout()
+    if args.use_ydrop:
+        model.use_normal_dropout()
     check = False
     for epoch in range(start_epoch, args.epochs):
         stats = False
         stats2 = False
         start_time = time.time()
-        if args.use_custom_dropout and (epoch) >= args.annealing_factor:
-            model.custom_dropout()
+        if args.use_ydrop and (epoch) >= args.annealing_factor:
+            model.use_ydrop()
             check = True
+            
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
             if (epoch+1)%(args.plot_freq) == 0:
@@ -324,9 +326,12 @@ def main(args):
         
         print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
               f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
-
-        if stats:
-            model.compute_and_plot_history_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
+        
+        if args.use_ydrop:
+            model.compute_statistics(stats=True)
+            if stats:
+                model.plot_progression_statistics(output_dir / 'plots',label = "")
+                model.compute_and_plot_history_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
             model.clear_update_history()
         checkpoint = {
                 'model_state_dict': model.state_dict(),

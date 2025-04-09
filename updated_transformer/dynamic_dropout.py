@@ -100,6 +100,26 @@ class MyDropout(nn.Module):
             if full_key in missing_keys:
                 missing_keys.remove(full_key)
 
+    def update_hyperparameters(self,elasticity = None,p=None,tied_layer: Optional[nn.Module] = None,scaler =None,mask_type = None):
+        """
+        Update the hyperparameters of the custom dropout layer.
+        elasticity: how quickly the dropout mask changes.
+        p: dropout probability.
+        tied_layer: the module whose output is tied to this dropout.
+        scaler: scaling factor used in computing keep probability.
+        mask_type: determines which method to use for computing the keep probability.
+        """
+        if elasticity is not None:
+            self.elasticity = elasticity
+        if p is not None:
+            self.base_keep = 1 - p
+            self.p = p
+        if tied_layer is not None:
+            self.tied_layer = tied_layer
+        if mask_type is not None:
+            self.mask_type = mask_type
+        if scaler is not None:
+            self.scaler = scaler
 
 
     def update_dropout_masks(self, scoring, stats=True):
@@ -256,6 +276,22 @@ class MyDropout(nn.Module):
  
         self.stats["scoring_history"].append(scoring.detach().cpu().numpy().copy())
         self.stats["dropout_history"].append(dropout.detach().cpu().numpy().copy())
+    def compute_statistics(self,stats = True):
+        scoring_hist = np.stack(self.stats["scoring_history"], axis=0)
+        dropout_hist = np.stack(self.stats["dropout_history"], axis=0)
+        score_mean = scoring_hist.sum()
+        dropout_mean = dropout_hist.mean()
+        score_var = scoring_hist.var()
+        dropout_var = dropout_hist.var()
+
+        self.avg_dropout.append(dropout_mean)
+        self.avg_scoring.append(score_mean)
+        self.var_dropout.append(dropout_var)
+        self.var_scoring.append(score_var)
+        print("Scoring Sum: ",score_mean)
+        print("Scoring Variance: ",score_var)
+        print("Keep Rate Mean: ",dropout_mean)
+        print("Keep Rate Variance: ",dropout_var)
     def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
         """
         Compute per-channel statistics from the saved history and generate two figures:
@@ -297,20 +333,6 @@ class MyDropout(nn.Module):
         # Compute statistics for scoring and dropout.
         mean_scoring, var_scoring, min_scoring, max_scoring, range_scoring = compute_stats(scoring_hist)
         mean_dropout, var_dropout, min_dropout, max_dropout, range_dropout = compute_stats(dropout_hist)
-
-        score_mean = scoring_hist.sum()
-        dropout_mean = dropout_hist.mean()
-        score_var = scoring_hist.var()
-        dropout_var = dropout_hist.var()
-
-        self.avg_dropout.append(dropout_mean)
-        self.avg_scoring.append(score_mean)
-        self.var_dropout.append(dropout_var)
-        self.var_scoring.append(score_var)
-        print("Scoring Sum: ",score_mean)
-        print("Scoring Variance: ",score_var)
-        print("Keep Rate Mean: ",dropout_mean)
-        print("Keep Rate Variance: ",dropout_var)
 
         # Define a helper function for plotting a 1D or 2D metric as a heatmap.
         def plot_metric_heatmap(metric, title, cmap='viridis'):
@@ -492,11 +514,11 @@ class MyDropout(nn.Module):
             self.base_keep = 1 - p
             self.beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep), dtype=self.previous.dtype, device=self.previous.device))
         return
-    def base_dropout(self):
+    def use_normal_dropout(self):
         """Use the standard dropout."""
         self.base = True
         return
-    def custom_dropout(self):
+    def use_ydrop(self):
         """Use the custom dropout."""
         self.base = False
         return

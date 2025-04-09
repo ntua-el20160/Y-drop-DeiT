@@ -9,7 +9,11 @@ import torch.nn as nn
 from functools import partial
 from torch.jit import Final
 from typing import Type, Optional
-import torch.nn.functional as F   
+import torch.nn.functional as F
+import copy
+from typing import Iterable
+from captum.attr import LayerConductance
+from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
 
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
@@ -34,257 +38,305 @@ class MyVisionTransformer(VisionTransformer):
         self.n_steps = n_steps  # number of interpolation steps for conductance
         # Ensure that self.blocks is built using your custom block_fn that implements
         # update_dropout_masks, e.g., MyTransformerBlock.
-        
-    def split_images(self, x: torch.Tensor, n_steps: int = None) -> torch.Tensor:
-        """
-        Create interpolation paths from a baseline (zeros) to x.
-        Returns a tensor of shape [B, n_steps+1, C, H, W] where B is the batch size.
-        """
-        if n_steps is None:
-            n_steps = self.n_steps
-        baseline = torch.zeros_like(x)  # shape: [B, C, H, W]
-        alphas = torch.linspace(0, 1, steps=n_steps + 1, device=x.device).view(1, n_steps + 1, 1, 1, 1)
-        x_exp = x.unsqueeze(1)          # shape: [B, 1, C, H, W]
-        baseline_exp = baseline.unsqueeze(1)  # shape: [B, 1, C, H, W]
-        interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
-        return interpolated  # shape: [B, n_steps+1, C, H, W]
-    
-    def find_knn_and_distance(interpolated: torch.Tensor, dataset: torch.Tensor, k: int):
-        """
-        For each image in the batch and each interpolation step, find the k nearest neighbors
-        in the dataset and calculate the Euclidean distance (straight path distance) to them.
-        
-        Parameters:
-            interpolated (torch.Tensor): Tensor of shape [B, n_steps+1, C, H, W] from split_images.
-            dataset (torch.Tensor): Tensor of all images in the dataset of shape [N, C, H, W].
-            k (int): Number of nearest neighbors to retrieve.
-        
-        Returns:
-            knn_indices (torch.Tensor): Indices of the k nearest neighbors for each interpolation step.
-                                        Shape: [B, n_steps+1, k]
-            knn_distances (torch.Tensor): The corresponding Euclidean distances.
-                                        Shape: [B, n_steps+1, k]
-        """
-        B, n_steps_plus_one, C, H, W = interpolated.shape
-        N = dataset.shape[0]
-        
-        # Flatten the spatial dimensions (and channels) so each image becomes a vector.
-        # For the interpolation images: [B, n_steps+1, C*H*W]
-        interpolated_flat = interpolated.view(B, n_steps_plus_one, -1)
-        # For the dataset: [N, C*H*W]
-        dataset_flat = dataset.view(N, -1)
-        
-        # Compute pairwise distances between each interpolation image and every image in the dataset.
-        # The result will have shape [B, n_steps+1, N]
-        distances = torch.cdist(interpolated_flat, dataset_flat, p=2)
-        
-        # For each interpolation image, find the indices and distances of the k nearest neighbors.
-        knn_distances, knn_indices = torch.topk(distances, k=k, largest=False)
-        
-        return knn_indices, knn_distances
-        
-    # def calculate_scores(self, batches: torch.Tensor,device: torch.device,n_batches:int =1,) -> torch.Tensor:
-    #     """
-    #     Compute conductance scores through the transformer blocks.
-    #     x: input image batch.
+        self.drop_list = []
+        self.selected_layers = []
+        self.scores = {}
+        for block in self.blocks:
+            for module in block.drop_list:
+                self.drop_list.append(module)
+            for layer in block.selected_layers:
+                self.selected_layers.append(layer)
 
-    #     This function creates an interpolation path from a baseline to x,
-    #     then sequentially passes it through each transformer block. Each block
-    #     is expected to (a) save outputs and gradients via save_output_gradients, and
-    #     (b) update its dropout masks using update_dropout_masks().
-    #     """
-    #     for batch in batches:
-    #         x, _ = batch  # assuming batch is (samples, targets)
-                
-    #         x = x.to(device, non_blocking=True)
-    #         #print(x.shape)
-    #         interp = self.split_images(x, n_steps=self.n_steps)
-    #         # Flatten the interpolation dimension into the batch dimension.
-    #         B, steps, C, H, W = interp.shape
-    #         interp_flat = interp.view(-1, C, H, W)
+    def use_normal_dropout(self):
+        for drop in self.drop_list:
+            drop.use_normal_dropout()
 
-    #         # 3. Process through the initial embedding layers.
-    #         x_emb = self.patch_embed(interp_flat)  # shape: [(n_steps+1)*B, N, D]
-    #         x_emb = self._pos_embed(x_emb)
-    #         x_emb = self.patch_drop(x_emb)
-    #         x_emb = self.norm_pre(x_emb)
+    def use_ydrop(self):
+        for drop in self.drop_list:
+            drop.use_ydrop()
 
-    #         # For each block, first run the forward pass to save outputs and gradients.
-    #         for block in self.blocks:
-    #             x_emb =block.save_output_gradients(x_emb, n_steps=self.n_steps)
-            
-    #         x_feat = self.norm(x_emb)
-    #         x_pool = self.pool(x_feat)            # pool() remains as in the base class.
-    #         x_fc = self.fc_norm(x_pool)
-    #         x_out = self.head_drop(x_fc)
-    #         out = self.head(x_out)
-            
-    #         # 6. Compute scalar loss and backpropagate to compute gradients.
-    #         loss = out.sum()
-    #         loss.backward()
+    def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            block_num = i//4
+            layer_num = i%4 
+            self.drop_list[i].compute_and_plot_history_statistics(epoch_label+f" Block {block_num} layer{layer_num}", save_dir)
 
-    #         # Then, update dropout masks based on the saved data.
-    #         for block in self.blocks:
-    #             block.calculate_conductance(n_steps=self.n_steps,n_batches=n_batches)
+    def compute_statistics(self):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].compute_statistics(stats=True)
+ 
+    def plot_progression_statistics(self, save_dir=None,label =''):
+        for i,_ in enumerate(self.drop_list):
+            block_num = i//4
+            layer_num = i%4
+            self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" Block_{block_num}_layer_{layer_num}")
+
+    def clear_update_history(self):
+        for drop in self.drop_list:
+            drop.clear_update_history()
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
+        # Create a detached copy of the model for IG computation.
+        model_clone = copy.deepcopy(self)
+        model_clone.to(device)
+        model_clone.eval()  
         
-    #     for block in self.blocks:
-    #         block.update_dropout_masks()
-        
-    #     # Optionally, you can run a normal forward pass on x now.
-    #     # Here, we return the original input (or you can run self.forward(x)).
-    #     return out
-    def calculate_scores(self, batches: torch.Tensor, device: torch.device, n_batches: int = 1) -> torch.Tensor:
-        """
-        Compute conductance scores through the transformer blocks.
-        x: input image batch.
+        # Initialize conductances for each layer
+        for i, _ in enumerate(model_clone.selected_layers):
+            model_clone.scores[f'drop_{i}'] = None
 
-        This function creates an interpolation path from a baseline to x,
-        then sequentially passes it through each transformer block. Each block
-        is expected to (a) save outputs and gradients via save_output_gradients, and
-        (b) update its dropout masks using update_dropout_masks().
-        """
         for batch in batches:
-            x, _ = batch  # assuming batch is (samples, targets)
-            x = x.to(device, non_blocking=True)
-            B = x.shape[0]
-            
-            # Process in mini-batches if B is greater than 32.
-            if B > 32:
-                
-                for i in range(0, B, 32):
-                    mini_x = x[i:i+32]
-                    interp = self.split_images(mini_x, n_steps=self.n_steps)
-                    mini_B, steps, C, H, W = interp.shape
-                    interp_flat = interp.view(-1, C, H, W)
+            x, _ = batch  # Batch is (samples, targets)
+            x_captum = x.detach().clone().requires_grad_()
+            x_captum = x_captum.to(device, non_blocking=True)
+            baseline = torch.zeros_like(x_captum)
 
-                    # Process through the initial embedding layers.
-                    x_emb = self.patch_embed(interp_flat)  # shape: [(n_steps+1)*mini_B, N, D]
-                    x_emb = self._pos_embed(x_emb)
-                    x_emb = self.patch_drop(x_emb)
-                    x_emb = self.norm_pre(x_emb)
+            # Get model predictions
+            outputs = model_clone(x_captum)
+            pred = outputs.argmax(dim=1)
 
-                    # For each block, run the forward pass to save outputs and gradients.
-                    for block in self.blocks:
-                        x_emb = block.save_output_gradients(x_emb, n_steps=self.n_steps)
+            #calculate conductunce for batch
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
-                    x_feat = self.norm(x_emb)
-                    x_pool = self.pool(x_feat)
-                    x_fc = self.fc_norm(x_pool)
-                    x_out = self.head_drop(x_fc)
-                    out = self.head(x_out)
+            # Average out the conductance across the batch and add it
+            for i, score in enumerate(captum_attrs):
+                score_mean = score.mean(dim=0)
+                if model_clone.scores[f'drop_{i}'] is None:
+                    # First time: initialize with the computed score_mean
+                    model_clone.scores[f'drop_{i}'] = score_mean.clone()
+                else:
+                    # Accumulate the score_mean
+                    model_clone.scores[f'drop_{i}'] += score_mean
 
-                    # Compute scalar loss and backpropagate.
-                    loss = out.sum()
-                    loss.backward()
+        # Update the dropout masks based on the accumulated conductances
+        for i, drop_layer in enumerate(model_clone.drop_list):
+            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}'], stats=stats)
 
-                    # Update conductance for each block.
-                    for block in self.blocks:
-                        block.calculate_conductance(n_steps=self.n_steps, n_batches=n_batches)
-            else:
-                # Process normally when B is less than or equal to 32.
-                interp = self.split_images(x, n_steps=self.n_steps)
-                B, steps, C, H, W = interp.shape
-                interp_flat = interp.view(-1, C, H, W)
-                
-                x_emb = self.patch_embed(interp_flat)
-                x_emb = self._pos_embed(x_emb)
-                x_emb = self.patch_drop(x_emb)
-                x_emb = self.norm_pre(x_emb)
-                
-                for block in self.blocks:
-                    x_emb = block.save_output_gradients(x_emb, n_steps=self.n_steps)
-                
-                x_feat = self.norm(x_emb)
-                x_pool = self.pool(x_feat)
-                x_fc = self.fc_norm(x_pool)
-                x_out = self.head_drop(x_fc)
-                out = self.head(x_out)
-                
-                loss = out.sum()
-                loss.backward()
-                
-                for block in self.blocks:
-                    block.calculate_conductance(n_steps=self.n_steps, n_batches=n_batches)
 
-    # After processing all batches, update the dropout masks.
-        shifts = 0
-        for block in self.blocks:
-            shifts+=block.update_dropout_masks()
-        print('Total shifts:',shifts)
-        return out
 
-    def base_dropout(self):
-        for block in self.blocks:
-            block.base_dropout()
-        return
-    def custom_dropout(self):
-        for block in self.blocks:
-            block.custom_dropout()
-        return
-    def update_hyperparameters(self,p_high=None, p_low=None,elasticity = None,mean_shift = None,p=None,layer= None,module =None):
-        for block in self.blocks:
-            block.update_hyperparameters(p_high,p_low,elasticity,mean_shift,p,layer,module)
-        return
+        #load the update on the model from the copy
+        for i,_ in enumerate(model_clone.drop_list):
+            self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
+            self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
+            self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
+            self.drop_list[i].stats = model_clone.drop_list[i].stats.copy()
+            self.drop_list[i].avg_scoring = model_clone.drop_list[i].avg_scoring
+            self.drop_list[i].avg_dropout = model_clone.drop_list[i].avg_dropout
+            self.drop_list[i].var_scoring = model_clone.drop_list[i].var_scoring
+            self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
+        self.train()
+
 
 
 
 
 @register_model
 def deit_tiny_patch16_224(pretrained=False, **kwargs):
-    # model = VisionTransformer(
-    #     patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
-    #     norm_layer=partial(nn.LayerNorm, eps=1e-6),mlp_layer=Mlp, block_fn=Block, **kwargs)
+    # Remove extra keys that timm might not want
     kwargs.pop('pretrained_cfg', None)
     kwargs.pop('pretrained_cfg_overlay', None)
     kwargs.pop('cache_dir', None)
+
+    # Extract relevant dropout / custom-dropout params
+    drop = kwargs.pop('drop_rate', 0.0)
+    ydrop = kwargs.pop('ydrop', True)
+    mask_type = kwargs.pop('mask_type', 'sigmoid')
+    elasticity = kwargs.pop('elasticity', 0.01)
+    scaler = kwargs.pop('scaler', 1.0)
+    n_steps = kwargs.pop('n_steps', 5)
+
+    print("[Registered Model - Tiny] drop_rate:", drop)
+    print("[Registered Model - Tiny] ydrop:", ydrop)
+    print("[Registered Model - Tiny] mask_type:", mask_type)
+    print("[Registered Model - Tiny] elasticity:", elasticity)
+    print("[Registered Model - Tiny] scaler:", scaler)
+    print("[Registered Model - Tiny] n_steps:", n_steps)
+
+    from functools import partial
+    from updated_transformer.block import Block
+    from updated_transformer.mlp import Mlp
+
+    # Create partial constructors for your custom Block & Mlp
+    block_partial = partial(
+        Block,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        attn_drop=drop,
+        proj_drop=drop,
+    )
+    mlp_partial = partial(
+        Mlp,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        drop=drop,  # Use the same drop or separate if desired
+    )
+
+    # Build MyVisionTransformer using your partials
     model = MyVisionTransformer(
-        patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),mlp_layer=Mlp, block_fn=Block, n_steps =5, **kwargs)
+        patch_size=16,
+        embed_dim=192,
+        depth=12,
+        num_heads=3,
+        mlp_ratio=4,
+        qkv_bias=True,
+        block_fn=block_partial,
+        mlp_layer=mlp_partial,
+        n_steps=n_steps,
+        proj_drop_rate=drop,
+        attn_drop_rate=drop,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        **kwargs
+    )
     model.default_cfg = _cfg()
+
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
             map_location="cpu", check_hash=True
         )
         model.load_state_dict(checkpoint["model"])
+
     return model
 
 
 @register_model
 def deit_small_patch16_224(pretrained=False, **kwargs):
-    # model = VisionTransformer(
-    #     patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-    #     norm_layer=partial(nn.LayerNorm, eps=1e-6),mlp_layer=Mlp, block_fn=Block, **kwargs)
+    # Remove extra keys that timm might not want
     kwargs.pop('pretrained_cfg', None)
     kwargs.pop('pretrained_cfg_overlay', None)
     kwargs.pop('cache_dir', None)
+
+    # Extract relevant dropout / custom-dropout params
+    drop = kwargs.pop('drop_rate', 0.0)
+    ydrop = kwargs.pop('ydrop', True)
+    mask_type = kwargs.pop('mask_type', 'sigmoid')
+    elasticity = kwargs.pop('elasticity', 0.01)
+    scaler = kwargs.pop('scaler', 1.0)
+    n_steps = kwargs.pop('n_steps', 5)
+
+    print("[Registered Model - Small] drop_rate:", drop)
+    print("[Registered Model - Small] ydrop:", ydrop)
+    print("[Registered Model - Small] mask_type:", mask_type)
+    print("[Registered Model - Small] elasticity:", elasticity)
+    print("[Registered Model - Small] scaler:", scaler)
+    print("[Registered Model - Small] n_steps:", n_steps)
+
+    from functools import partial
+    from updated_transformer.block import Block
+    from updated_transformer.mlp import Mlp
+
+    # Create partial constructors for your custom Block & Mlp
+    block_partial = partial(
+        Block,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        attn_drop=drop,
+        proj_drop=drop,
+    )
+    mlp_partial = partial(
+        Mlp,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        drop=drop,
+    )
+
+    # Build MyVisionTransformer using your partials
     model = MyVisionTransformer(
-        patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),mlp_layer=Mlp, block_fn=Block, n_steps =5, **kwargs
+        patch_size=16,
+        embed_dim=384,
+        depth=12,
+        num_heads=6,
+        mlp_ratio=4,
+        qkv_bias=True,
+        block_fn=block_partial,
+        mlp_layer=mlp_partial,
+        n_steps=n_steps,
+        proj_drop_rate=drop,
+        attn_drop_rate=drop,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        **kwargs
     )
     model.default_cfg = _cfg()
+
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
             map_location="cpu", check_hash=True
         )
         model.load_state_dict(checkpoint["model"])
+
     return model
 
 
 @register_model
 def deit_base_patch16_224(pretrained=False, **kwargs):
-    # model = VisionTransformer(
-    #     patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-    #     norm_layer=partial(nn.LayerNorm, eps=1e-6), mlp_layer=Mlp, block_fn=Block, **kwargs)
+    # Remove extra keys that timm might not want
     kwargs.pop('pretrained_cfg', None)
     kwargs.pop('pretrained_cfg_overlay', None)
     kwargs.pop('cache_dir', None)
+
+    drop = kwargs.pop('drop_rate', 0.0)
+    ydrop = kwargs.pop('ydrop', True)
+    mask_type = kwargs.pop('mask_type', 'sigmoid')
+    elasticity = kwargs.pop('elasticity', 0.01)
+    scaler = kwargs.pop('scaler', 1.0)
+    n_steps = kwargs.pop('n_steps', 5)
+
+    print("[Registered Model] drop_rate:", drop)
+    print("[Registered Model] ydrop:", ydrop)
+    print("[Registered Model] mask_type:", mask_type)
+    print("[Registered Model] elasticity:", elasticity)
+    print("[Registered Model] scaler:", scaler)
+    print("[Registered Model] n_steps:", n_steps)
+
+    from functools import partial
+    from updated_transformer.block import Block
+    from updated_transformer.mlp import Mlp
+
+    # Make partial constructors
+    block_partial = partial(
+        Block,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        attn_drop=drop,
+        proj_drop=drop,
+    )
+    mlp_partial = partial(
+        Mlp,
+        ydrop=ydrop,
+        mask_type=mask_type,
+        elasticity=elasticity,
+        scaler=scaler,
+        drop=drop,  # use the same drop for MLP as well, or pass differently
+    )
+
     model = MyVisionTransformer(
-        patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), mlp_layer=Mlp, block_fn=Block, n_steps =5, **kwargs
+        patch_size=16,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        mlp_ratio=4,
+        qkv_bias=True,
+        block_fn=block_partial,
+        mlp_layer=mlp_partial,
+        n_steps=n_steps,
+        proj_drop_rate=drop,
+        attn_drop_rate=drop,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),
+        **kwargs
     )
     model.default_cfg = _cfg()
+
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",

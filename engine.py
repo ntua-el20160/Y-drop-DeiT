@@ -27,24 +27,24 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, stats: bool = False) -> dict:
+   
     # TODO fix this for finetuning
     model.train()
     criterion.train()
-    #model.base_dropout()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 200
+    print_freq = 1
+
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     new_iter = iter(data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
-    #for batch_idx, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
+        
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
@@ -52,7 +52,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 # Now, get the next "update_batches" batches from the peek iterator.
                 model.calculate_scores(next_batches,device,stats=stats)
 
-            #model.check_dead_neurons(samples)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
@@ -66,34 +65,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         
 
         optimizer.zero_grad()
-
-        # loss_scaler(loss, optimizer, clip_grad=max_norm,
-        #             parameters=model.parameters(), create_graph=is_second_order)
-        fc1_weight_norm_before = model.fc1.weight.norm().item()
-        #print(f"[Batch {batch_idx}] fc1 weight norm before update: {fc1_weight_norm_before:.4f}")
-
-        optimizer.zero_grad()
-        loss.backward()
-        # if model.fc1.weight.grad is not None:
-        #     fc1_grad_norm = model.fc1.weight.grad.norm().item()
-        #     print(f"[Batch {batch_idx}] fc1 grad norm: {fc1_grad_norm:.4f}")
-        # else:
-        #     print(f"[Batch {batch_idx}] fc1 grad is None")
-        
-        optimizer.step()
-        fc1_weight_norm_after = model.fc1.weight.norm().item()
-        #print(f"[Batch {batch_idx}] fc1 weight norm after update: {fc1_weight_norm_after:.4f}")
+        is_second_order = False 
+        loss_scaler(loss, optimizer, clip_grad=max_norm,
+                   parameters=model.parameters(), create_graph=is_second_order)
+       
+        # optimizer.zero_grad()
+        # loss.backward()
+        # optimizer.step()
         torch.cuda.synchronize()
 
-        
-
-             
-        if batch_idx == 1500:
-            baseline = torch.zeros_like(samples)
-            baseline_act = model(baseline)
-            real_act = model(samples)
-            print("Baseline activation fc1:", baseline_act.mean().item())
-            print("Real activation fc1:", real_act.mean().item())
         if model_ema is not None:
             model_ema.update(model)
 
