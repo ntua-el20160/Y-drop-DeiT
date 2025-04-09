@@ -330,10 +330,8 @@ def main(args):
             if history:
                 for i, drop in enumerate(model.drop_list):
                     drop_history = history.get(f'drop{i}', {})
-                    drop.avg_scoring = drop_history.get('avg_scoring', [])
-                    drop.avg_dropout = drop_history.get('avg_dropout', [])
-                    drop.var_scoring = drop_history.get('var_scoring', [])
-                    drop.var_dropout = drop_history.get('var_dropout', [])
+                    drop.progression_keep = drop_history.get('progression_keep', [])
+                    drop.progression_scoring = drop_history.get('progression_scoring', [])
             if args.model_ema:
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
         
@@ -480,7 +478,9 @@ def main(args):
             patience_counter += 1
         
         if (epoch in [4, 9, 19]) and (not check):
-            checkpoint_path = simple_output_dir / f'models/base_epoch_{epoch}.pth'
+            simple_output_dir = simple_output_dir / 'models'
+            simple_output_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = simple_output_dir / f'base_epoch_{epoch}.pth'
             utils.save_on_master({
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),

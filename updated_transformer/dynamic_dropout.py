@@ -64,8 +64,8 @@ class MyDropout(nn.Module):
         self.running_dropout_mean = None  # Running (per-neuron) average of keep probability.
         
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
-        self.scoring_hist = np.zeros(50)  
-        self.keep_hist = np.zeros(50)
+        self.scoring_hist = np.zeros(100)  
+        self.keep_hist = np.zeros(100)
         
         # For progression statistics (one scalar per update).
         self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
@@ -265,11 +265,11 @@ class MyDropout(nn.Module):
             self.sum_scoring += current_sum_scoring
 
         # Update histograms.
-        bins_scoring = np.linspace(-2, 2, 51)  # 50 bins => 51 edges.
+        bins_scoring = np.linspace(-1, 1, 101)  # 50 bins => 51 edges.
         hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
         self.scoring_hist += hist_scoring
         
-        bins_keep = np.linspace(0, 1, 51)
+        bins_keep = np.linspace(0, 1, 101)
         hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
         self.keep_hist += hist_keep
         
@@ -307,7 +307,7 @@ class MyDropout(nn.Module):
         fig, axs = plt.subplots(2, 2, figsize=(12, 10))
         
         # Histogram for scoring.
-        bins_scoring = np.linspace(-5, 5, 51)
+        bins_scoring = np.linspace(-1, 1, 101)
         bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
         axs[0, 0].bar(bin_centers_scoring, self.scoring_hist, width=(bins_scoring[1]-bins_scoring[0]))
         axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
@@ -315,7 +315,7 @@ class MyDropout(nn.Module):
         axs[0, 0].set_ylabel("Count")
         
         # Histogram for keep probability.
-        bins_keep = np.linspace(0, 1, 51)
+        bins_keep = np.linspace(0, 1, 101)
         bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
         axs[0, 1].bar(bin_centers_keep, self.keep_hist, width=(bins_keep[1]-bins_keep[0]))
         axs[0, 1].set_title(f"{epoch_label} - Keep Probability Histogram")
