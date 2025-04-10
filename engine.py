@@ -13,6 +13,7 @@ import sys
 from typing import Iterable, Optional
 
 import torch
+import numpy as np
 
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
@@ -21,12 +22,37 @@ import utils
 
 import itertools
 
+def infinite_loader(loader):
+    """A generator that loops infinitely over a DataLoader."""
+    while True:
+        for batch in loader:
+            yield batch
+
+def get_random_batch(cached_data, batch_size):
+    """
+    Randomly sample batch_size items from the cached subdataset.
+    
+    Args:
+      cached_data: A list containing all (data, target) tuples.
+      batch_size: The desired batch size.
+      
+    Returns:
+      A tuple (images, targets), where images is a tensor and targets is a tensor.
+    """
+    indices = np.random.choice(len(cached_data), size=batch_size, replace=False)
+    batch = [cached_data[i] for i in indices]
+    # Assume each item in cached_data is a tuple: (image, target)
+    images, targets = zip(*batch)
+    # Stack images. (Ensure that each image is already a tensor.)
+    images = torch.stack(images)
+    targets = torch.tensor(targets)
+    return images, targets
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5, stats: bool = False) -> dict:
+                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -35,20 +61,32 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
+    sub_infinite_iter = infinite_loader(update_data_loader)
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     new_iter = iter(data_loader)
+    sub_iter = iter(update_data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-        
+        #print('batch_idx:', batch_idx)
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
-                next_batches = list(itertools.islice(new_iter, update_batches))
+                if update_data_loader == None:
+                    next_batches = list(itertools.islice(new_iter, update_batches))
+                else:
+                    next_batches = []
+                    for _ in range(update_batches):
+                        # Get a random batch from the preloaded cached_subdataset.
+                        sub_samples, sub_targets = get_random_batch(update_data_loader, batch_size=32)  # Use desired sub batch size (e.g. 32)
+                        # Move the subbatch to device.
+                        sub_samples = sub_samples.to(device, non_blocking=True)
+                        sub_targets = sub_targets.to(device, non_blocking=True)
+                        next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
                 model.calculate_scores(next_batches,device,stats=stats)
 
@@ -66,12 +104,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         is_second_order = False 
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                   parameters=model.parameters(), create_graph=is_second_order)
+        # loss_scaler(loss, optimizer, clip_grad=max_norm,
+        #            parameters=model.parameters(), create_graph=is_second_order)
        
         # optimizer.zero_grad()
-        # loss.backward()
-        # optimizer.step()
+        loss.backward()
+        optimizer.step()
         torch.cuda.synchronize()
 
         if model_ema is not None:

@@ -15,6 +15,11 @@ from torchvision.datasets.folder import ImageFolder, default_loader
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.data import create_transform
 
+import numpy as np
+import random
+from torch.utils.data import Subset, DataLoader
+from sklearn.model_selection import StratifiedShuffleSplit
+
 
 class INatDataset(ImageFolder):
     def __init__(self, root, train=True, year=2018, transform=None, target_transform=None,
@@ -116,3 +121,38 @@ def build_transform(is_train, args):
     t.append(transforms.ToTensor())
     t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
     return transforms.Compose(t)
+
+
+def create_subdataset(dataset, batch_size, sub_factor=10, stratified=False):
+    """
+    Create a subdataset with size = sub_factor * batch_size samples.
+    
+    Parameters:
+      dataset: The full training dataset (e.g. created via build_dataset).
+      batch_size: The desired batch size.
+      sub_factor: Multiplier for batch size (subdataset size = batch_size * sub_factor).
+      stratified: Boolean flag. If True, do stratified sampling based on class labels;
+                  otherwise, perform random sampling.
+    
+    Returns:
+      A torch.utils.data.Subset representing the subdataset.
+    """
+    sub_size = sub_factor * batch_size
+    total_samples = len(dataset)
+    
+    if sub_size > total_samples:
+        raise ValueError(f"Subdataset size {sub_size} exceeds total number of samples {total_samples}.")
+
+    if stratified:
+        # Assume the dataset contains a property "targets" (e.g. for ImageFolder or CIFAR).
+        # You might need to adjust this depending on your dataset structure.
+        labels = np.array(dataset.targets)
+        strat_split = StratifiedShuffleSplit(n_splits=1, test_size=(total_samples - sub_size)/total_samples, random_state=42)
+        # Only the train indices are used for subdataset.
+        for sub_indices, _ in strat_split.split(np.arange(total_samples), labels):
+            selected_indices = sub_indices
+    else:
+        # Random sampling without replacement
+        selected_indices = random.sample(range(total_samples), sub_size)
+    
+    return Subset(dataset, selected_indices)

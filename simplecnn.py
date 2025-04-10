@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from datasets import build_dataset
+from datasets import build_dataset, create_subdataset
 # Import your custom dropout module.
 from updated_transformer.dynamic_dropout import MyDropout
 from engine import train_one_epoch, evaluate
@@ -94,7 +94,7 @@ class CNN6_S1(nn.Module):
         
         # Initialize conductances for each layer
         for i, _ in enumerate(self.selected_layers):
-            model_clone.scores[f'drop_{i}'] = 0.0
+            model_clone.scores[f'drop_{i}'] = None
 
         for batch in batches:
             x, _ = batch  # Batch is (samples, targets)
@@ -112,12 +112,15 @@ class CNN6_S1(nn.Module):
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
-                model_clone.scores[f'drop_{i}'] += score.mean(dim=0)
+                score_mean = score.mean(dim=0)
+                if model_clone.scores[f'drop_{i}'] is None:
+                    # First time: initialize with the computed score_mean
+                    model_clone.scores[f'drop_{i}'] = score_mean.clone()
+                else:
+                    # Accumulate the score_mean
+                    model_clone.scores[f'drop_{i}'] += score_mean
 
         #update the masks based on the scores
-        for i,_ in enumerate(model_clone.drop_list):
-            model_clone.drop_list[i].update_dropout_masks(model_clone.scores[f'drop_{i}'],stats)
-        # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
                 model_clone.scores[f'drop_{i}'],
@@ -130,11 +133,17 @@ class CNN6_S1(nn.Module):
             self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
             self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
             self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
-            self.drop_list[i].stats = model_clone.drop_list[i].stats.copy()
-            self.drop_list[i].avg_scoring = model_clone.drop_list[i].avg_scoring
-            self.drop_list[i].avg_dropout = model_clone.drop_list[i].avg_dropout
-            self.drop_list[i].var_scoring = model_clone.drop_list[i].var_scoring
-            self.drop_list[i].var_dropout = model_clone.drop_list[i].var_dropout
+            self.drop_list[i].running_scoring_mean = model_clone.drop_list[i].running_scoring_mean
+            self.drop_list[i].running_dropout_mean = model_clone.drop_list[i].running_dropout_mean
+            self.drop_list[i].keep_hist = model_clone.drop_list[i].keep_hist
+            self.drop_list[i].scoring_hist = model_clone.drop_list[i].scoring_hist
+            self.drop_list[i].progression_scoring = model_clone.drop_list[i].progression_scoring
+            self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
+            self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
+            self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
+        del model_clone
+        torch.cuda.empty_cache()
+
         self.train()
     
     def use_normal_dropout(self):
@@ -144,26 +153,22 @@ class CNN6_S1(nn.Module):
     def use_ydrop(self):
         for drop in self.drop_list:
             drop.use_ydrop()
-    def compute_and_plot_history_statistics(self, epoch_label, save_dir=None):
+    def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].compute_and_plot_history_statistics(epoch_label+f" fc{i}", save_dir)
+            self.drop_list[i].plot_aggregated_statistics(epoch_label+f"layer {i}", save_dir)
 
+    def update_progression(self):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].update_progression()
  
     def plot_progression_statistics(self, save_dir=None,label =''):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" drop{i}")
+            self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" layer {i}")
 
-    def clear_update_history(self):
+
+    def clear_progression(self):
         for drop in self.drop_list:
-            drop.clear_update_history()
-# \
-#     def check_dead_neurons(self, x):
-#         with torch.no_grad():
-#             activations = F.relu(self.fc1(self.flatten(self.pool(F.relu(self.bn2(self.conv2(
-#                 self.pool(F.relu(self.bn1(self.conv1(x)))))))))))
-#             active_neurons = (activations > 0).float().mean().item()
-#             print(f"Fraction of active fc1 neurons: {active_neurons:.4f}")
-
+            drop.clear_progression()
 
 
 def get_args_parser():
@@ -174,10 +179,10 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda', type=str, help='Device to use for training (cuda or cpu)')
     parser.add_argument('--seed', default=42, type=int, help='Random seed')
     parser.add_argument('--output_dir', default='./output', type=str, help='Directory to save checkpoints and logs')
-    parser.add_argument('--use_ydrop', action='store_true', default=True,
-                        help='Enable Y-Drop (MyDropout) instead of standard dropout')
-    parser.add_argument('--no_ydrop', action='store_false', dest='use_custom_dropout',
-                        help='Disable custom dropout')
+    parser.add_argument('--ydrop', action='store_true', default=True,
+                    help='Enable Y-Drop (MyDropout) by default')
+    parser.add_argument('--no-ydrop', dest='ydrop', action='store_false',
+                    help='Disable Y-Drop (MyDropout)')
     parser.set_defaults(ydrop=True)
     parser.add_argument('--data-path', default='/datasets01_101/imagenet_full_size/061417/', type=str,
                         help='dataset path')
@@ -236,9 +241,28 @@ def main(args):
     test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                                shuffle=False, num_workers=4, pin_memory=True)
     
+    sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=10, stratified=True)
+    #print(sub_dataset.shape())
+    def preload_subdataset(subdataset):
+        """
+        Given a small subdataset (a torch.utils.data.Subset),
+        load all (data, target) pairs into memory as a list.
+        """
+        cached = [subdataset[i] for i in range(len(subdataset))]
+        return cached
+
+    # Example: Create a subdataset from your full training set.
+    # train_dataset is assumed to be already created by your build_dataset.
+    # Example usage:
+    # sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=10, stratified=True)
+    # Then pre-load it:
+    cached_subdataset = preload_subdataset(sub_dataset)
+    #sub_batch_size = 32
+    #sub_dataloader = torch.utils.data.DataLoader(sub_dataset, batch_size=sub_batch_size, shuffle=False, num_workers=4)
+
     # Initialize the model.
     # Initialize the model using the CNN6_S1 architecture (smallest configuration).
-    model = CNN6_S1(num_classes=10, use_custom_dropout=args.use_custom_dropout,
+    model = CNN6_S1(num_classes=10, use_custom_dropout=args.ydrop,
                 elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
     model = model.to(device)
 
@@ -249,13 +273,15 @@ def main(args):
     output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    # dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
+    # model(dummy_input)
     
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
+        start_epoch = checkpoint.get('epoch', 0) + 1
         print(f"Resumed at epoch {start_epoch}")
         cumulative_train_time = checkpoint['train_time']
         best_acc = checkpoint['best_acc']
@@ -263,10 +289,8 @@ def main(args):
         if history:
             for i, drop in enumerate(model.drop_list):
                 drop_history = history.get(f'drop{i}', {})
-                drop.avg_scoring = drop_history.get('avg_scoring', [])
-                drop.avg_dropout = drop_history.get('avg_dropout', [])
-                drop.var_scoring = drop_history.get('var_scoring', [])
-                drop.var_dropout = drop_history.get('var_dropout', [])
+                drop.progression_keep = drop_history.get('progression_keep', [])
+                drop.progression_scoring = drop_history.get('progression_scoring', [])
 
     else:
         start_epoch = 0
@@ -280,21 +304,18 @@ def main(args):
     best_loss = float('inf')
     #initially normal dropout
     loss_scaler = NativeScaler()
-    if args.use_ydrop:
+    if args.ydrop:
         model.use_normal_dropout()
     check = False
     for epoch in range(start_epoch, args.epochs):
         stats = False
-        stats2 = False
         start_time = time.time()
-        if args.use_ydrop and (epoch) >= args.annealing_factor:
+
+        if args.ydrop and epoch >= args.annealing_factor:
             model.use_ydrop()
             check = True
-            
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
-            if (epoch+1)%(args.plot_freq) == 0:
-                stats2 = True
 
             
 
@@ -313,12 +334,12 @@ def main(args):
             check=check,
             update_freq=args.update_freq,
             update_batches=args.update_batches,
-            stats = stats
+            stats = stats,
+            update_data_loader = cached_subdataset
         )
 
         epoch_time = time.time() - start_time
         cumulative_train_time += epoch_time
-        print(stats)
         
         
         # Evaluate on the test set.
@@ -327,12 +348,12 @@ def main(args):
         print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
               f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
         
-        if args.use_ydrop:
-            model.compute_statistics(stats=True)
-            if stats:
-                model.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.compute_and_plot_history_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
-            model.clear_update_history()
+        if check and stats:
+            model.update_progression()
+            model.plot_progression_statistics(output_dir / 'plots',label = "")
+            model.plot_aggregated_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
+            model.clear_progression()
+
         checkpoint = {
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -343,22 +364,21 @@ def main(args):
                 'train_time': cumulative_train_time,
                 'best_acc': best_acc,  
             }
-        if args.use_custom_dropout:
+        if args.ydrop:
             checkpoint['history'] = {}
             for i, drop in enumerate(model.drop_list):
-                checkpoint['history'][f'drop{i}'] = {
-                    'avg_scoring': drop.avg_scoring,
-                    'avg_dropout': drop.avg_dropout,
-                    'var_scoring': drop.var_scoring,
-                    'var_dropout': drop.var_dropout,
-                }     
-        torch.save(checkpoint, output_dir / "checkpoint.pth")
+                    checkpoint['history'][f'drop{i}'] = {
+                        'progression_keep': drop.progression_keep,
+                        'progression_scoring': drop.progression_scoring,
+                    }    
 
         # Save checkpoint if a new best accuracy is reached.
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
-
+            checkpoint['best_acc'] = best_acc
             torch.save(checkpoint, output_dir /"best_model.pth")
+        torch.save(checkpoint, output_dir / "checkpoint.pth")
+
         
         # Log epoch statistics.
         log_stats = {
@@ -368,8 +388,7 @@ def main(args):
             'time': cumulative_train_time,
             'best_acc': best_acc,
         }
-        if stats2:
-            model.plot_progression_statistics(output_dir / 'plots')
+
         with (output_dir/ "log.txt").open("a") as f:
             f.write(json.dumps(log_stats) + "\n")
     

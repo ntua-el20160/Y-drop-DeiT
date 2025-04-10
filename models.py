@@ -127,8 +127,6 @@ class MyVisionTransformer(VisionTransformer):
             self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
             self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
             self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
-        print("Memory allocated:", torch.cuda.memory_allocated(device))
-        print("Max memory reserved:", torch.cuda.max_memory_reserved(device))    
         del model_clone
         torch.cuda.empty_cache()
 

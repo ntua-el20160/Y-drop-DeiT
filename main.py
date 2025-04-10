@@ -392,7 +392,7 @@ def main(args):
             check=check,
             update_freq=args.update_freq,
             update_batches=args.update_batches,
-            stats = True
+            stats = stats
         )
 
         
@@ -419,10 +419,7 @@ def main(args):
         print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
               f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
         
-
-        if args.output_dir:
-            checkpoint_path = output_dir / 'checkpoint.pth'
-            checkpoint ={
+        checkpoint ={
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
@@ -436,65 +433,45 @@ def main(args):
                 'best_acc': best_acc,
                 'patience_counter': patience_counter
                 }
-            if args.ydrop:
-                checkpoint['history'] = {}
-                for i, drop in enumerate(model.drop_list):
-                    checkpoint['history'][f'drop{i}'] = {
-                        'progression_keep': drop.progression_keep,
-                        'progression_scoring': drop.progression_scoring,
-                    }    
-
-            utils.save_on_master(checkpoint, checkpoint_path)
-        
+        if args.ydrop:
+            checkpoint['history'] = {}
+            for i, drop in enumerate(model.drop_list):
+                checkpoint['history'][f'drop{i}'] = {
+                    'progression_keep': drop.progression_keep,
+                    'progression_scoring': drop.progression_scoring,
+                }   
         if test_loss < best_loss:
             best_loss = test_loss
+            checkpoint['lowest_loss'] = best_loss
             patience_counter = 0  # reset early stopping counter
-            if args.output_dir:
-                best_checkpoint_path = output_dir / 'best.pth'
-                checkpoint ={
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'model_ema': get_state_dict(model_ema),
-                'args': args,
-                'test_acc': test_acc,
-                'test_loss': test_loss,
-                'lowest_loss': best_loss,
-                'train_time': cumulative_train_time,  # cumulative training time so far
-                'best_acc': best_acc,
-                'patience_counter': patience_counter
-                }
-                if args.ydrop:
-                    checkpoint['history'] = {}
-                    for i, drop in enumerate(model.drop_list):
-                        checkpoint['history'][f'drop{i}'] = {
-                            'progression_keep': drop.progression_keep,
-                            'progression_scoring': drop.progression_scoring,
-                        }    
-
-                utils.save_on_master(checkpoint, best_checkpoint_path)
+            if args.output_dir:  
+                utils.save_on_master(checkpoint, output_dir / 'best.pth')
         else:
             patience_counter += 1
+
+        if args.output_dir:
+            utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')
         
-        if (epoch in [4, 9, 19]) and (not check):
-            simple_output_dir = simple_output_dir / 'models'
-            simple_output_dir.mkdir(parents=True, exist_ok=True)
-            checkpoint_path = simple_output_dir / f'base_epoch_{epoch}.pth'
-            utils.save_on_master({
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'model_ema': get_state_dict(model_ema),
-                'args': args,
-                'test_acc': test_acc,
-                'test_loss': test_loss,
-                'lowest_loss': best_loss,
-                'train_time': cumulative_train_time,  # cumulative training time so far
-                'best_acc': best_acc,
-                'patience_counter': patience_counter
-            }, checkpoint_path)
+        
+        
+        # if (epoch in [4, 9, 19]) and (not check):
+        #     simple_output_dir = simple_output_dir / 'models'
+        #     simple_output_dir.mkdir(parents=True, exist_ok=True)
+        #     checkpoint_path = simple_output_dir / f'base_epoch_{epoch}.pth'
+        #     utils.save_on_master({
+        #         'model': model_without_ddp.state_dict(),
+        #         'optimizer': optimizer.state_dict(),
+        #         'lr_scheduler': lr_scheduler.state_dict(),
+        #         'epoch': epoch,
+        #         'model_ema': get_state_dict(model_ema),
+        #         'args': args,
+        #         'test_acc': test_acc,
+        #         'test_loss': test_loss,
+        #         'lowest_loss': best_loss,
+        #         'train_time': cumulative_train_time,  # cumulative training time so far
+        #         'best_acc': best_acc,
+        #         'patience_counter': patience_counter
+        #     }, checkpoint_path)
 
         if patience_counter >= args.early_stopping_patience:
             print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
