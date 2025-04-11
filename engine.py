@@ -22,11 +22,6 @@ import utils
 
 import itertools
 
-def infinite_loader(loader):
-    """A generator that loops infinitely over a DataLoader."""
-    while True:
-        for batch in loader:
-            yield batch
 
 def get_random_batch(cached_data, batch_size):
     """
@@ -61,12 +56,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
-    sub_infinite_iter = infinite_loader(update_data_loader)
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     new_iter = iter(data_loader)
-    sub_iter = iter(update_data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)

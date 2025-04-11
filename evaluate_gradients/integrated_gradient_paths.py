@@ -3,22 +3,7 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import networkx as nx
 
-def split_images(self, x: torch.Tensor, n_steps: int = 5) -> torch.Tensor:
-    """
-    Create interpolation paths from a baseline (zeros) to x.
-    Returns a tensor of shape [B, n_steps+1, C, H, W] where B is the batch size.
-    """
-    baseline = torch.zeros_like(x)  # shape: [B, C, H, W]
-    alphas = torch.linspace(0, 1, steps=n_steps + 1, device=x.device).view(1, n_steps + 1, 1, 1, 1)
-    x_exp = x.unsqueeze(1)          # shape: [B, 1, C, H, W]
-    baseline_exp = baseline.unsqueeze(1)  # shape: [B, 1, C, H, W]
-    interpolated = baseline_exp + alphas * (x_exp - baseline_exp)
-    return interpolated  # shape: [B, n_steps+1, C, H, W]
 
-import torch
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
-import networkx as nx
 
 class GeodesicPathCalculator:
     def __init__(self, dataset: torch.Tensor, k: int, device: torch.device = None):

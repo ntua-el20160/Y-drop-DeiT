@@ -47,7 +47,7 @@ class MyDropout(nn.Module):
         self.scaler = scaler
         self.mask_type = mask_type
         self.base = False
-        self.base_keep = 1 - p
+        self.base_keep = 1 - self.p
         self.tied_layer = tied_layer  # Store the tied layer for reference.
 
         # Buffers will be lazily initialized based on the tied layer's output.
@@ -107,8 +107,16 @@ class MyDropout(nn.Module):
         # Normalize scoring
         if scoring.std() > 1e-6:
             normalized = (scoring - scoring.mean()) / scoring.std()
+            # s_min, s_max = scoring.min(), scoring.max()
+
+            # denom = (s_max - s_min).clamp(min=1e-6)
+            # normalized = (scoring - s_min) / denom
         else:
             normalized = scoring - scoring.mean()
+            # s_min, s_max = scoring.min(), scoring.max()
+
+            # denom = (s_max - s_min).clamp(min=1e-6)
+            # normalized = (scoring - s_min) / denom
 
         #Different mask types
         if self.mask_type == "sigmoid":
@@ -118,59 +126,54 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "sigmoid_mod":
             # Example smaller slope + random noise
-            noise = 0.01 * torch.randn_like(normalized)
-            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)+ noise
+            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)*0.8 + 0.2*self.base_keep
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            probs = torch.softmax(-scoring, dim=0)
+            probs = torch.softmax(-normalized, dim=0)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
             keep_prob = raw_keep.clamp(min=0.3, max=0.95)
 
-        elif self.mask_type == "softmax_alt":
-            # Make sure scoring is not huge in magnitude.
-            probs = (-torch.softmax(scoring, dim=0)) +1
+        elif self.mask_type == "softmax_mod":
+            probs = torch.softmax(-normalized, dim=0)
 
             #normalize for average dropout rate close to p
-            raw_keep = probs * self.scaling.numel() * self.base_keep
+            raw_keep = probs * self.scaling.numel() * self.base_keep*0.8 + 0.2*self.base_keep
             keep_prob = raw_keep.clamp(min=0.3, max=0.95)
         
 
+        # elif self.mask_type == "softmax_renorm":
+        #     probs = torch.softmax(-scoring, dim=0)
 
-
-
-        elif self.mask_type == "softmax_renorm":
-            probs = torch.softmax(-scoring, dim=0)
-
-            raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.0, max=1.0)
-            # optionally renormalize to keep average near self.base_keep
-            keep_prob = keep_prob / keep_prob.mean() * self.base_keep
-            keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
+        #     raw_keep = probs * self.scaling.numel() * self.base_keep
+        #     keep_prob = raw_keep.clamp(min=0.0, max=1.0)
+        #     # optionally renormalize to keep average near self.base_keep
+        #     keep_prob = keep_prob / keep_prob.mean() * self.base_keep
+        #     keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
 
         
-        elif self.mask_type == "rank":
-            #flatten scores and sort them
-            flat_scores = scoring.view(-1)
-            sorted_indices = torch.argsort(flat_scores, descending=False)
+        # elif self.mask_type == "rank":
+        #     #flatten scores and sort them
+        #     flat_scores = scoring.view(-1)
+        #     sorted_indices = torch.argsort(flat_scores, descending=False)
 
-            #create ramp from 1 to 0
-            ranks = torch.arange(len(flat_scores), device=scoring.device).float()
-            ramp = 1.0 - ranks / (len(flat_scores) - 1)
+        #     #create ramp from 1 to 0
+        #     ranks = torch.arange(len(flat_scores), device=scoring.device).float()
+        #     ramp = 1.0 - ranks / (len(flat_scores) - 1)
 
-            # aassign ramp values to the sorted indices
-            keep_prob_flat = torch.empty_like(flat_scores)
-            keep_prob_flat[sorted_indices] = ramp
-            keep_prob = keep_prob_flat.view_as(scoring)
+        #     # aassign ramp values to the sorted indices
+        #     keep_prob_flat = torch.empty_like(flat_scores)
+        #     keep_prob_flat[sorted_indices] = ramp
+        #     keep_prob = keep_prob_flat.view_as(scoring)
 
-            # Rescale average
-            current_mean = keep_prob.mean()
-            if current_mean > 1e-6:
-                keep_prob = keep_prob / current_mean * self.base_keep
-            keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
+        #     # Rescale average
+        #     current_mean = keep_prob.mean()
+        #     if current_mean > 1e-6:
+        #         keep_prob = keep_prob / current_mean * self.base_keep
+        #     keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
         
         elif self.mask_type == "inverse":
             #inverse sigmoid for fine-tuning

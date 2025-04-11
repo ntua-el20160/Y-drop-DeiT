@@ -335,7 +335,7 @@ def main(args):
             update_freq=args.update_freq,
             update_batches=args.update_batches,
             stats = stats,
-            update_data_loader = cached_subdataset
+            update_data_loader = None
         )
 
         epoch_time = time.time() - start_time
