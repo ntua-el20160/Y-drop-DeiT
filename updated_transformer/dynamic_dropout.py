@@ -105,19 +105,12 @@ class MyDropout(nn.Module):
         """
 
         # Normalize scoring
-        if scoring.std() > 1e-6:
-            normalized = (scoring - scoring.mean()) / scoring.std()
-            # s_min, s_max = scoring.min(), scoring.max()
 
-            # denom = (s_max - s_min).clamp(min=1e-6)
-            # normalized = (scoring - s_min) / denom
-        else:
-            normalized = scoring - scoring.mean()
-            # s_min, s_max = scoring.min(), scoring.max()
-
-            # denom = (s_max - s_min).clamp(min=1e-6)
-            # normalized = (scoring - s_min) / denom
-
+        normalized = (scoring - scoring.mean()) / scoring.std()
+        # epsilon = 1e-6
+        # s_min, s_max = scoring.min(), scoring.max()
+        # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+        
         #Different mask types
         if self.mask_type == "sigmoid":
             # Original approach
@@ -143,37 +136,7 @@ class MyDropout(nn.Module):
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep*0.8 + 0.2*self.base_keep
             keep_prob = raw_keep.clamp(min=0.3, max=0.95)
-        
 
-        # elif self.mask_type == "softmax_renorm":
-        #     probs = torch.softmax(-scoring, dim=0)
-
-        #     raw_keep = probs * self.scaling.numel() * self.base_keep
-        #     keep_prob = raw_keep.clamp(min=0.0, max=1.0)
-        #     # optionally renormalize to keep average near self.base_keep
-        #     keep_prob = keep_prob / keep_prob.mean() * self.base_keep
-        #     keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
-
-        
-        # elif self.mask_type == "rank":
-        #     #flatten scores and sort them
-        #     flat_scores = scoring.view(-1)
-        #     sorted_indices = torch.argsort(flat_scores, descending=False)
-
-        #     #create ramp from 1 to 0
-        #     ranks = torch.arange(len(flat_scores), device=scoring.device).float()
-        #     ramp = 1.0 - ranks / (len(flat_scores) - 1)
-
-        #     # aassign ramp values to the sorted indices
-        #     keep_prob_flat = torch.empty_like(flat_scores)
-        #     keep_prob_flat[sorted_indices] = ramp
-        #     keep_prob = keep_prob_flat.view_as(scoring)
-
-        #     # Rescale average
-        #     current_mean = keep_prob.mean()
-        #     if current_mean > 1e-6:
-        #         keep_prob = keep_prob / current_mean * self.base_keep
-        #     keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
         
         elif self.mask_type == "inverse":
             #inverse sigmoid for fine-tuning
@@ -248,7 +211,7 @@ class MyDropout(nn.Module):
         # a) Detach and convert to CPU numpy arrays.
 
         scoring_det = scoring.detach().cpu().float()
-        keep_prob_det = keep_prob.detach().cpu().float()
+        keep_prob_det = 1-keep_prob.detach().cpu().float()
         
         
         # b) Update running means per neuron.
@@ -268,11 +231,13 @@ class MyDropout(nn.Module):
             self.sum_scoring += current_sum_scoring
 
         # Update histograms.
-        bins_scoring = np.linspace(-1, 1, 101)  # 50 bins => 51 edges.
+        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
+
         hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
         self.scoring_hist += hist_scoring
         
-        bins_keep = np.linspace(0, 1, 101)
+        bins_keep = np.linspace(0.0, 0.8, 101)
+
         hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
         self.keep_hist += hist_keep
         
@@ -310,7 +275,8 @@ class MyDropout(nn.Module):
         fig, axs = plt.subplots(2, 2, figsize=(12, 10))
         
         # Histogram for scoring.
-        bins_scoring = np.linspace(-1, 1, 101)
+        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
+
         bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
         axs[0, 0].bar(bin_centers_scoring, self.scoring_hist, width=(bins_scoring[1]-bins_scoring[0]))
         axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
@@ -318,11 +284,12 @@ class MyDropout(nn.Module):
         axs[0, 0].set_ylabel("Count")
         
         # Histogram for keep probability.
-        bins_keep = np.linspace(0, 1, 101)
+        bins_keep = np.linspace(0.0, 0.8, 101)
+
         bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
         axs[0, 1].bar(bin_centers_keep, self.keep_hist, width=(bins_keep[1]-bins_keep[0]))
-        axs[0, 1].set_title(f"{epoch_label} - Keep Probability Histogram")
-        axs[0, 1].set_xlabel("Keep Probability")
+        axs[0, 1].set_title(f"{epoch_label} - Dropout Rate Histogram")
+        axs[0, 1].set_xlabel("Dropout Rate")
         axs[0, 1].set_ylabel("Count")
         
         # Heatmap for running scoring mean.
@@ -340,7 +307,7 @@ class MyDropout(nn.Module):
             dropout_mean_np = self.running_dropout_mean.cpu().numpy()
             dropout_mean_2d = to_2d(dropout_mean_np)
             im1 = axs[1, 1].imshow(dropout_mean_2d, aspect='auto', cmap='magma')
-            axs[1, 1].set_title(f"{epoch_label} - Mean Keep Rate per Neuron")
+            axs[1, 1].set_title(f"{epoch_label} - Mean Dropout Rate per Neuron")
             fig.colorbar(im1, ax=axs[1, 1])
         else:
             axs[1, 1].text(0.5, 0.5, "No Data", ha="center", va="center")
@@ -349,7 +316,81 @@ class MyDropout(nn.Module):
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             fig.savefig(os.path.join(save_dir, f"{epoch_label}_aggregated_stats.png"))
-        plt.close(fig)   
+        plt.close(fig)
+
+    def plot_current_stats(self, epoch_label, save_dir=None):
+        """
+        Plot the aggregated statistics:
+         • Two histograms:
+              - Scoring histogram (50 bins, fixed range -5 to 5).
+              - Keep probability histogram (50 bins, fixed range 0 to 1).
+         • Two heatmaps:
+              - Running per-neuron average scoring.
+              - Running per-neuron average keep probability.
+        """
+        scoring_det = self.scoring.detach().cpu().float()
+        keep_prob_det = 1-self.previous.detach().cpu().float()
+        score_mean = scoring_det.mean().item()
+        score_std = scoring_det.std().item()
+        keep_mean = keep_prob_det.mean().item()
+        keep_std = keep_prob_det.std().item()
+        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
+        hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
+        bins_keep = np.linspace(0.0, 0.8, 101)
+        hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # Histogram for scoring.
+        bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
+        axs[0, 0].bar(bin_centers_scoring, hist_scoring, width=(bins_scoring[1]-bins_scoring[0]))
+        axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
+        axs[0, 0].set_xlabel("Scoring")
+        axs[0, 0].set_ylabel("Count")
+        axs[0, 0].text(
+            0.05, 0.95,
+            f"Mean: {score_mean:.3f}\nStd: {score_std:.3f}",
+            transform=axs[0, 0].transAxes,
+            va="top"
+        )
+        
+        # Histogram for keep probability.
+        bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
+        axs[0, 1].bar(bin_centers_keep, hist_keep, width=(bins_keep[1]-bins_keep[0]))
+        axs[0, 1].set_title(f"{epoch_label} - Dropout Histogram")
+        axs[0, 1].set_xlabel("Dropout Rate")
+        axs[0, 1].set_ylabel("Count")
+        axs[0, 1].text(
+            0.05, 0.95,
+            f"Mean: {keep_mean:.3f}\nStd: {keep_std:.3f}",
+            transform=axs[0, 1].transAxes,
+            va="top"
+        )
+        
+        # Heatmap for running scoring mean.
+        if self.scoring is not None:
+            scoring_mean_np = self.scoring.cpu().numpy()
+            scoring_mean_2d = to_2d(scoring_mean_np)
+            im0 = axs[1, 0].imshow(scoring_mean_2d, aspect='auto', cmap='viridis')
+            axs[1, 0].set_title(f"{epoch_label} - Scoring per Neuron")
+            fig.colorbar(im0, ax=axs[1, 0])
+        else:
+            axs[1, 0].text(0.5, 0.5, "No Data", ha="center", va="center")
+        
+        # Heatmap for running keep probability mean.
+        if self.previous is not None:
+            dropout_mean_np = 1-self.previous.cpu().numpy()
+            dropout_mean_2d = to_2d(dropout_mean_np)
+            im1 = axs[1, 1].imshow(dropout_mean_2d, aspect='auto', cmap='magma')
+            axs[1, 1].set_title(f"{epoch_label} - Dropout Rate per Neuron")
+            fig.colorbar(im1, ax=axs[1, 1])
+        else:
+            axs[1, 1].text(0.5, 0.5, "No Data", ha="center", va="center")
+        
+        plt.tight_layout()
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"{epoch_label}_current_stats.png"))
+        plt.close(fig)      
     
 
     def plot_progression_statistics(self, save_dir=None, label="progression"):
@@ -373,9 +414,9 @@ class MyDropout(nn.Module):
         
         # Plot progression for keep probability.
         axs[1].plot(updates, self.progression_keep, marker='o', linestyle='-')
-        axs[1].set_title("Overall Average Keep Probability over an Epoch Progression")
+        axs[1].set_title("Overall Average Dropout Rate over an Epoch Progression")
         axs[1].set_xlabel("Update Number")
-        axs[1].set_ylabel("Average Keep Probability")
+        axs[1].set_ylabel("Average Dropout Rate")
         axs[1].grid(True)
         
         plt.tight_layout()

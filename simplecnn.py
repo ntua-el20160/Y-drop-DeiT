@@ -156,6 +156,10 @@ class CNN6_S1(nn.Module):
     def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         for i,_ in enumerate(self.drop_list):
             self.drop_list[i].plot_aggregated_statistics(epoch_label+f"layer {i}", save_dir)
+    
+    def plot_current_stats(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].plot_current_stats(epoch_label+f"layer {i}", save_dir)
 
     def update_progression(self):
         for i,_ in enumerate(self.drop_list):
@@ -335,7 +339,8 @@ def main(args):
             update_freq=args.update_freq,
             update_batches=args.update_batches,
             stats = stats,
-            update_data_loader = None
+            update_data_loader = None,
+            output_dir = output_dir,
         )
 
         epoch_time = time.time() - start_time

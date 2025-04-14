@@ -47,7 +47,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None) -> dict:
+                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,output_dir: str = None,) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -86,6 +86,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
+            if stats and batch_idx % 350 == 0:
+                model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350}', output_dir / 'plots')
+
+                
+            
 
 
         loss_value = loss.item()
