@@ -66,6 +66,10 @@ class MyDropout(nn.Module):
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
         self.keep_hist = np.zeros(100)
+
+        self.random_neurons = [75,360,888,1001]
+        self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
+        self.random_neuron_hists_keep = [np.zeros(100) for _ in range(4)]  # List of random neuron histograms.
         
         # For progression statistics (one scalar per update).
         self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
@@ -176,6 +180,7 @@ class MyDropout(nn.Module):
 
 
 
+
     def forward(self, input):
         
         if not self.initialized:
@@ -212,8 +217,8 @@ class MyDropout(nn.Module):
 
         scoring_det = scoring.detach().cpu().float()
         keep_prob_det = 1-keep_prob.detach().cpu().float()
-        
-        
+        # print("Scoring shape: ",scoring_det.shape)
+        # print("Keep rate shape: ",keep_prob_det.shape)        
         # b) Update running means per neuron.
         if self.running_scoring_mean is None:
             self.running_scoring_mean = scoring_det.clone()
@@ -235,10 +240,19 @@ class MyDropout(nn.Module):
 
         hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
         self.scoring_hist += hist_scoring
+        for i, neuron in enumerate(self.random_neurons):
+            hist_scoring_neuron, _ = np.histogram(np.array([scoring_det[neuron].item()]), bins=bins_scoring)
+            self.random_neuron_hists_scoring[i] += hist_scoring_neuron
         
         bins_keep = np.linspace(0.0, 0.8, 101)
 
         hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
+        for i, neuron in enumerate(self.random_neurons):
+            
+            hist_keep_neuron, _ = np.histogram(np.array([keep_prob_det[neuron].item()]), bins=bins_keep)
+            self.random_neuron_hists_keep[i] += hist_keep_neuron
+            # print("Neuron",neuron,"Keep rate: ",keep_prob_det[neuron].item())
+            # print(f"Histogram o neuron {neuron} so far ", self.random_neuron_hists_keep[i])
         self.keep_hist += hist_keep
         
         # Increment the update counter.
@@ -258,6 +272,8 @@ class MyDropout(nn.Module):
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
         self.keep_hist = np.zeros(100)
+        self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
+        self.random_neuron_hists_keep = [np.zeros(100) for _ in range(4)]  # List of random neuron histograms.
         
         # For progression statistics (one scalar per update).
         self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
@@ -390,7 +406,41 @@ class MyDropout(nn.Module):
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             fig.savefig(os.path.join(save_dir, f"{epoch_label}_current_stats.png"))
-        plt.close(fig)      
+        plt.close(fig)
+
+    def plot_random_node_histograms_scoring(self, epoch_label, save_dir=None):
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
+        for i, neuron in enumerate(self.random_neurons):
+            hist_scoring = self.random_neuron_hists_scoring[i]
+            bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
+            axs[i // 2, i % 2].bar(bin_centers_scoring, hist_scoring, width=(bins_scoring[1]-bins_scoring[0]))
+            axs[i // 2, i % 2].set_title(f"{epoch_label} Neuron {neuron} - Scoring Histogram")
+            axs[i // 2, i % 2].set_xlabel("Scoring")
+            axs[i // 2, i % 2].set_ylabel("Count")
+        plt.tight_layout()
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_scoring_histograms.png"))
+        plt.close(fig)
+    def plot_random_node_histograms_keep(self, epoch_label, save_dir=None):
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+        bins_keep = np.linspace(0.0, 0.8, 101)
+        for i, neuron in enumerate(self.random_neurons):
+            hist_scoring = self.random_neuron_hists_keep[i]
+            bin_centers_scoring = (bins_keep[:-1] + bins_keep[1:]) / 2
+            axs[i // 2, i % 2].bar(bin_centers_scoring, hist_scoring, width=(bins_keep[1]-bins_keep[0]))
+            axs[i // 2, i % 2].set_title(f"{epoch_label} Neuron {neuron} - Dropout Rate Histogram")
+            axs[i // 2, i % 2].set_xlabel("Dropout Rate")
+            axs[i // 2, i % 2].set_ylabel("Count")
+        plt.tight_layout()
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_dropout_histograms.png"))
+        plt.close(fig)
+
+
+
     
 
     def plot_progression_statistics(self, save_dir=None, label="progression"):

@@ -87,7 +87,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             outputs = model(samples)
             loss = criterion(outputs, targets)
             if stats and batch_idx % 350 == 0:
-                model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350}', output_dir / 'plots')
+                model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350} ', output_dir / 'plots')
 
                 
             

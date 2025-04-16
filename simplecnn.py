@@ -141,6 +141,9 @@ class CNN6_S1(nn.Module):
             self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
             self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
             self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
+            self.drop_list[i].random_neuron_hists_scoring = model_clone.drop_list[i].random_neuron_hists_scoring
+            self.drop_list[i].random_neuron_hists_keep = model_clone.drop_list[i].random_neuron_hists_keep
+            
         del model_clone
         torch.cuda.empty_cache()
 
@@ -168,6 +171,12 @@ class CNN6_S1(nn.Module):
     def plot_progression_statistics(self, save_dir=None,label =''):
         for i,_ in enumerate(self.drop_list):
             self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" layer {i}")
+    def plot_random_node_histograms_scoring(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].plot_random_node_histograms_scoring(epoch_label+f"layer {i}", save_dir)
+    def plot_random_node_histograms_keep(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].plot_random_node_histograms_keep(epoch_label+f"layer {i}", save_dir)
 
 
     def clear_progression(self):
@@ -356,7 +365,9 @@ def main(args):
         if check and stats:
             model.update_progression()
             model.plot_progression_statistics(output_dir / 'plots',label = "")
-            model.plot_aggregated_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
+            model.plot_aggregated_statistics(f'Epoch {epoch+1} ', output_dir / 'plots')
+            model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', output_dir / 'plots')
+            model.plot_random_node_histograms_keep(f'Epoch {epoch+1} ', output_dir / 'plots')
             model.clear_progression()
 
         checkpoint = {
