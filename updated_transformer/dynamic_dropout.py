@@ -66,8 +66,8 @@ class MyDropout(nn.Module):
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
         self.keep_hist = np.zeros(100)
+        self.random_neurons = []  # Randomly selected neurons for histogram tracking.
 
-        self.random_neurons = [75,360,888,1001]
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
         self.random_neuron_hists_keep = [np.zeros(100) for _ in range(4)]  # List of random neuron histograms.
         
@@ -91,6 +91,11 @@ class MyDropout(nn.Module):
         self.scoring = new_scoring
         self.beta = new_beta
         self.initialized = True
+        num_neurons = new_prev.numel()
+        self.random_neurons = np.random.choice(num_neurons, size=min(4, num_neurons), replace=False).tolist()
+        self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
+        self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
+
 
 
 
@@ -272,8 +277,8 @@ class MyDropout(nn.Module):
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
         self.keep_hist = np.zeros(100)
-        self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
-        self.random_neuron_hists_keep = [np.zeros(100) for _ in range(4)]  # List of random neuron histograms.
+        self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
+        self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
         
         # For progression statistics (one scalar per update).
         self.sum_scoring = None  # Cumulative sum to compute overall average scoring.

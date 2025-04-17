@@ -143,7 +143,7 @@ class CNN6_S1(nn.Module):
             self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
             self.drop_list[i].random_neuron_hists_scoring = model_clone.drop_list[i].random_neuron_hists_scoring
             self.drop_list[i].random_neuron_hists_keep = model_clone.drop_list[i].random_neuron_hists_keep
-            
+
         del model_clone
         torch.cuda.empty_cache()
 
@@ -219,6 +219,11 @@ def get_args_parser():
     parser.add_argument('--resume', default='', type=str, help='Path to checkpoint to resume training or load a model')
     parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
     parser.add_argument('--mask_type', default='sigmoid', type=str, help='Type of mask for dropout')
+    parser.add_argument('--sub_dataset', default ='none',choices=['none','stratified', 'random'] ,type=str, help='Sub dataset to use for training')
+    parser.add_argument('--sub_factor', default=10, type=int, help='Sub dataset factor')
+    parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
+                        help='Scale update frequency  for custom dropout')
+    parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
 
     return parser
 
@@ -254,7 +259,7 @@ def main(args):
     test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                                shuffle=False, num_workers=4, pin_memory=True)
     
-    sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=10, stratified=True)
+
     #print(sub_dataset.shape())
     def preload_subdataset(subdataset):
         """
@@ -263,18 +268,17 @@ def main(args):
         """
         cached = [subdataset[i] for i in range(len(subdataset))]
         return cached
+    
+    if args.sub_dataset == 'stratified':
+        sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    elif args.sub_dataset == 'random':
+        sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    else:
+        cached_subdataset = None
 
-    # Example: Create a subdataset from your full training set.
-    # train_dataset is assumed to be already created by your build_dataset.
-    # Example usage:
-    # sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=10, stratified=True)
-    # Then pre-load it:
-    cached_subdataset = preload_subdataset(sub_dataset)
-    #sub_batch_size = 32
-    #sub_dataloader = torch.utils.data.DataLoader(sub_dataset, batch_size=sub_batch_size, shuffle=False, num_workers=4)
-
-    # Initialize the model.
-    # Initialize the model using the CNN6_S1 architecture (smallest configuration).
+  
     model = CNN6_S1(num_classes=10, use_custom_dropout=args.ydrop,
                 elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
     model = model.to(device)
@@ -310,11 +314,18 @@ def main(args):
         cumulative_train_time = 0.0
         best_acc = 0.0
         
+    if args.update_scaling == 'increasing':
+
+        update_freq = 1
+    else:
+        update_freq = args.update_freq
     
-    
+    effective_epochs = args.epochs - args.annealing_factor
+    step_size = round(effective_epochs / args.update_scaling_steps)
+    denom = max(1, args.update_scaling_steps - 1)    
+
     print("Start training")
     start_time = time.time()
-    best_loss = float('inf')
     #initially normal dropout
     loss_scaler = NativeScaler()
     if args.ydrop:
@@ -329,6 +340,17 @@ def main(args):
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
+
+            if args.update_scaling!='no':
+                i = (epoch - args.annealing_factor) // step_size
+                i = min(i, args.update_scaling_steps - 1)
+
+                if args.update_scaling == 'increasing':
+                    step_index = i
+                else:
+                    step_index = args.update_scaling_steps - 1 - i
+                update_freq = round(1 + (args.update_freq - 1) * step_index / denom)
+                print(f"[Epoch {epoch}] Update frequency set to {update_freq}")
 
             
 
@@ -345,10 +367,10 @@ def main(args):
             model_ema=None,
             mixup_fn=None,
             check=check,
-            update_freq=args.update_freq,
+            update_freq=update_freq,
             update_batches=args.update_batches,
             stats = stats,
-            update_data_loader = None,
+            update_data_loader = cached_subdataset,
             output_dir = output_dir,
         )
 

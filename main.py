@@ -21,7 +21,7 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
-from datasets import build_dataset
+from datasets import build_dataset, create_subdataset
 from engine import train_one_epoch, evaluate
 from samplers import RASampler
 import models
@@ -182,6 +182,12 @@ def get_args_parser():
     parser.add_argument('--plot_freq', default=5, type=int, help='plot frequency')
     parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
     parser.add_argument('--mask_type', default='sigmoid', type=str, help='Type of mask for dropout')
+    
+    parser.add_argument('--sub_dataset', default ='none',choices=['none','stratified', 'random'] ,type=str, help='Sub dataset to use for training')
+    parser.add_argument('--sub_factor', default=10, type=int, help='Sub dataset factor')
+    parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
+                        help='Scale update frequency  for custom dropout')
+    parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
 
     return parser
 
@@ -203,6 +209,33 @@ def main(args):
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
+
+    def preload_subdataset(subdataset):
+        """
+        Given a small subdataset (a torch.utils.data.Subset),
+        load all (data, target) pairs into memory as a list.
+        """
+        cached = [subdataset[i] for i in range(len(subdataset))]
+        return cached
+    
+    if args.sub_dataset == 'stratified':
+        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    elif args.sub_dataset == 'random':
+        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    else:
+        cached_subdataset = None
+    
+    if args.update_scaling == 'increasing':
+
+        update_freq = 1
+    else:
+        update_freq = args.update_freq
+    
+    effective_epochs = args.epochs - args.annealing_factor
+    step_size = round(effective_epochs / args.update_scaling_steps)
+    denom = max(1, args.update_scaling_steps - 1) 
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -374,6 +407,16 @@ def main(args):
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
+            if args.update_scaling!='no':
+                i = (epoch - args.annealing_factor) // step_size
+                i = min(i, args.update_scaling_steps - 1)
+
+                if args.update_scaling == 'increasing':
+                    step_index = i
+                else:
+                    step_index = args.update_scaling_steps - 1 - i
+                update_freq = round(1 + (args.update_freq - 1) * step_index / denom)
+                print(f"[Epoch {epoch}] Update frequency set to {update_freq}")
         
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
