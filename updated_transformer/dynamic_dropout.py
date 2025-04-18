@@ -133,7 +133,9 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            probs = torch.softmax(-normalized, dim=0)
+            flat = scoring.view(-1)
+            softmax_flat = torch.softmax(flat/self.scaling.numel(), dim=0)
+            probs = softmax_flat.view(scoring.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep

@@ -49,7 +49,7 @@ class CNN6_S1(nn.Module):
         self.fc3 = nn.Linear(1024, num_classes)
         
         # Use MyDropout for fc1 and fc2 outputs.
-        self.selected_layers = [self.relu1, self.relu2]
+        self.selected_layers = [self.fc1, self.fc2]
         if use_custom_dropout:
             self.drop_list = nn.ModuleList([
                 MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler)
@@ -74,12 +74,12 @@ class CNN6_S1(nn.Module):
         
         # FC1 with dropout
         x = self.fc1(x)
-        x = self.selected_layers[0](x)  # relu1
+        x = self.relu1(x)  # relu1
         x = self.drop_list[0](x)
         
         # FC2 with dropout
         x = self.fc2(x)
-        x = self.selected_layers[1](x)  # relu2
+        x = self.relu2(x)  # relu2
         x = self.drop_list[1](x)
         
         # Output layer
