@@ -123,52 +123,50 @@ class MyDropout(nn.Module):
         #Different mask types
         if self.mask_type == "sigmoid":
             # Original approach
-            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
+            scoring = -scoring
+            normalized = (scoring - scoring.mean()) / scoring.std()
+            keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
-        elif self.mask_type == "sigmoid_mod":
+        elif self.mask_type == "sigmoid_inverse":
+            normalized = (scoring - scoring.mean()) / scoring.std()
             # Example smaller slope + random noise
-            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)*0.8 + 0.2*self.base_keep
+            keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            flat = scoring.view(-1)
-            softmax_flat = torch.softmax(flat/self.scaling.numel(), dim=0)
+            scoring = -scoring
+
+            epsilon = 1e-6
+            s_min, s_max = scoring.min(), scoring.max()
+            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+        
+            flat = normalized.view(-1)
+            softmax_flat = torch.softmax(flat, dim=0)
             probs = softmax_flat.view(scoring.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.3, max=0.95)
+            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
 
-        elif self.mask_type == "softmax_mod":
-            probs = torch.softmax(-normalized, dim=0)
+        elif self.mask_type == "softmax_inverse":
+            # Make sure scoring is not huge in magnitude.
+            epsilon = 1e-6
+            s_min, s_max = scoring.min(), scoring.max()
+            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+        
+            flat = normalized.view(-1)
+            softmax_flat = torch.softmax(flat, dim=0)
+            probs = softmax_flat.view(scoring.shape)
 
             #normalize for average dropout rate close to p
-            raw_keep = probs * self.scaling.numel() * self.base_keep*0.8 + 0.2*self.base_keep
-            keep_prob = raw_keep.clamp(min=0.3, max=0.95)
-
-        
-        elif self.mask_type == "inverse":
-            #inverse sigmoid for fine-tuning
-            keep_prob = 1.0 - torch.sigmoid(normalized)
-            keep_prob = torch.clamp(keep_prob, 0.3, max=0.95)
-        
-        elif self.mask_type == "dynamic_sigmoid":
-            #Normalize scoring to [0, 1]
-            s_min, s_max = scoring.min(), scoring.max()
-
-            denom = (s_max - s_min).clamp(min=1e-6)
-            scaled = (scoring - s_min) / denom  # [0, 1]
-            # Scale to [-2, 2]
-            scaled = -(4.0 * scaled - 2.0)        # map to [-2, 2]
-
-            # Apply sigmoid to get keep probability
-            keep_prob = torch.sigmoid(scaled)
-            keep_prob = torch.clamp(keep_prob, 0.3, 0.95)
+            raw_keep = probs * self.scaling.numel() * self.base_keep
+            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
 
         else:
             # Fallback or default
+            normalized = (scoring - scoring.mean()) / scoring.std()
             keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
 
