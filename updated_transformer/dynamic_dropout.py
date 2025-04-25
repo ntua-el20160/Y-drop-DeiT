@@ -134,6 +134,7 @@ class MyDropout(nn.Module):
             keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
+        
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
             scoring = -scoring
@@ -163,6 +164,20 @@ class MyDropout(nn.Module):
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
             keep_prob = raw_keep.clamp(min=0.3, max=1.0)
+        elif self.mask_type == "softmax_absolute":
+            # Make sure scoring is not huge in magnitude.
+            epsilon = 1e-6
+            s_min, s_max = scoring.min(), scoring.max()
+            normalized = torch.abs(2 *self.scaler* (scoring - s_min) / (s_max - s_min + epsilon) - self.scaler)
+
+            flat = normalized.view(-1)
+            softmax_flat = torch.softmax(flat, dim=0)
+            probs = softmax_flat.view(scoring.shape)
+
+            #normalize for average dropout rate close to p
+            raw_keep = probs * self.scaling.numel() * self.base_keep
+            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
+
 
         else:
             # Fallback or default
