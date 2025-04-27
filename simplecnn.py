@@ -86,7 +86,7 @@ class CNN6_S1(nn.Module):
         x = self.fc3(x)
         return x
 
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -124,7 +124,8 @@ class CNN6_S1(nn.Module):
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
                 model_clone.scores[f'drop_{i}'],
-                stats=stats
+                stats=stats,
+                update_freq=update_freq,
             )
 
 

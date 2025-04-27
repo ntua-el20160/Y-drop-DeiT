@@ -9,10 +9,14 @@ import sys
 import os
 
 # Insert the parent directory into sys.path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, parent_dir)
+import runpy
 
-from datasets import create_subdataset
+# Run the file and get its globals dict
+module_globals = runpy.run_path(r"C:/Users/tsets/Desktop/Y-drop/deit/datasets.py")
+
+# Extract the function
+create_subdataset = module_globals["create_subdataset"]
+
 
 import matplotlib.pyplot as plt
 
@@ -113,7 +117,7 @@ class GeodesicPathCalculator:
             # We'll display the first "anchor" (e.g., baseline anchor_points[0]) 
             # as the "query" image. You could also show the actual target image "img",
             # depending on which you'd like to see.
-            query_img = interp_points[0].reshape(C, H, W)
+            query_img = interp_points[-1].reshape(C, H, W)
 
             axarr[0].imshow(query_img.transpose(1, 2, 0))
             axarr[0].axis('off')
@@ -298,7 +302,10 @@ if __name__ == "__main__":
     ])
     train_dataset = torchvision.datasets.CIFAR10(root="C:/Users/tsets/Desktop/Y-drop/data/cifar", train=True, download=True,
                                                 transform=transform_train)
+    print("Dataset length:", len(train_dataset))
     sub_dataset = create_subdataset(train_dataset, batch_size=10, sub_factor=10, stratified=True)
+    print("Subdataset length:", len(sub_dataset))
+    print("Subdataset dimensions:", sub_dataset[0][0].shape)
     def preload_subdataset(subdataset):
         """
         Given a small subdataset (a torch.utils.data.Subset),
@@ -313,6 +320,7 @@ if __name__ == "__main__":
     # sub_dataset = create_subdataset(train_dataset, batch_size=args.batch_size, sub_factor=10, stratified=True)
     # Then pre-load it:
     dataset = preload_subdataset(sub_dataset)
+    image_tensor = torch.stack([img for img, _ in dataset], dim=0)
     x_batch = torch.stack([img[0] for img in dataset[:5]], dim=0)  # shape: [B, C, H, W]
     # Optionally, define a dummy gradient function.
     def dummy_gradient_fn(img: torch.Tensor) -> torch.Tensor:
@@ -320,10 +328,10 @@ if __name__ == "__main__":
         return torch.ones_like(img)
     
     # Create an instance of the GeodesicPathCalculator.
-    calculator = GeodesicPathCalculator(dataset, k=5, device=x_batch.device)
+    calculator = GeodesicPathCalculator(image_tensor, k=10, device=x_batch.device)
     
     # Compute geodesic paths with 10 interpolation steps.
-    geodesic_paths,linear_paths = calculator.compute_geodesic_paths_batch(x_batch, n_steps=10, gradient_fn=None)
+    geodesic_paths,linear_paths = calculator.compute_geodesic_paths_batch(x_batch, n_steps=5, gradient_fn=None)
     plot_paths(geodesic_paths, linear_paths, sample_idx=0)
     print("Geodesic paths shape:", geodesic_paths.shape)
     print("Linear paths shape:", linear_paths.shape)

@@ -59,7 +59,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
-    new_iter = iter(data_loader)
+    #new_iter = iter(data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -70,7 +70,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
-                    next_batches = list(itertools.islice(new_iter, update_batches))
+                    #next_batches = list(itertools.islice(new_iter, update_batches))
+                    next_batches = [(samples.clone(), targets.clone())]
                 else:
                     next_batches = []
                     for _ in range(update_batches):
@@ -81,7 +82,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                model.calculate_scores(next_batches,device,stats=stats)
+                model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq)
 
 
             outputs = model(samples)

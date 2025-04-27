@@ -99,7 +99,7 @@ class MyDropout(nn.Module):
 
 
 
-    def update_dropout_masks(self, scoring, stats=True):
+    def update_dropout_masks(self, scoring, stats=True,update_freq:int = 1):
         """Update the dropout masks based on the scoring tensor.
         scoring: a tensor of shape [channels] representing the scoring values.
         stats: whether to save the scoring and dropout history.
@@ -192,9 +192,10 @@ class MyDropout(nn.Module):
 
         if stats:
             self.update_aggregated_statistics(scoring, keep_prob)
-
+        
+        el  = min(self.elasticity*update_freq,1.0)
         # Momentum-like update
-        self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
+        self.scaling = self.scaling * (1 - el) + keep_prob * el
         self.previous.copy_(keep_prob)
         self.scoring.copy_(scoring)
 

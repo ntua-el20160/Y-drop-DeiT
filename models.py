@@ -74,7 +74,7 @@ class MyVisionTransformer(VisionTransformer):
     def clear_progression(self):
         for drop in self.drop_list:
             drop.clear_progression()
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -110,7 +110,7 @@ class MyVisionTransformer(VisionTransformer):
 
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
-            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}'], stats=stats)
+            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}'], stats=stats,update_freq=update_freq)
 
 
 

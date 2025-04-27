@@ -433,9 +433,11 @@ def main(args):
             model_ema=model_ema,
             mixup_fn=mixup_fn,
             check=check,
-            update_freq=args.update_freq,
+            update_freq=update_freq,
             update_batches=args.update_batches,
-            stats = stats
+            stats = stats,
+            update_data_loader = cached_subdataset,
+            output_dir = output_dir,
         )
 
         
