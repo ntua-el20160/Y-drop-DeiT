@@ -131,6 +131,7 @@ class MyVisionTransformer(VisionTransformer):
         torch.cuda.empty_cache()
 
         self.train()
+        return pred
 
 
 

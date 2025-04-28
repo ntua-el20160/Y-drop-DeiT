@@ -11,6 +11,8 @@ import math
 import os
 import sys
 from typing import Iterable, Optional
+import torch.nn.functional as F
+
 
 import torch
 import numpy as np
@@ -71,9 +73,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 # Get the next update_batches batches.
                 if update_data_loader == None:
                     #next_batches = list(itertools.islice(new_iter, update_batches))
+                    #a =0
                     next_batches = [(samples.clone(), targets.clone())]
+                    a = 1
                 else:
                     next_batches = []
+                    a= 0
                     for _ in range(update_batches):
                         # Get a random batch from the preloaded cached_subdataset.
                         sub_samples, sub_targets = get_random_batch(update_data_loader, batch_size=32)  # Use desired sub batch size (e.g. 32)
@@ -82,11 +87,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq)
-
+                pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq)
 
             outputs = model(samples)
-            loss = criterion(outputs, targets)
+            #possibly bidirectional kl divergence loss multplied by a 
+            if a != 0:
+                p_loss = F.kl_div(F.log_softmax(pred, dim=-1), F.softmax(outputs, dim=-1), reduction='none')
+                q_loss = F.kl_div(F.log_softmax(outputs, dim=-1), F.softmax(pred, dim=-1), reduction='none')
+                print('p_loss:', p_loss.mean())
+                print('q_loss:', q_loss.mean())
+                loss = criterion(outputs, targets) + a*(p_loss.mean()+q_loss.mean())/2
+
+            else:
+                loss = criterion(outputs, targets) 
             if stats and batch_idx % 350 == 0:
                 model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350} ', output_dir / 'plots')
 
