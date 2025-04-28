@@ -61,6 +61,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
+    a= 0
     #new_iter = iter(data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
