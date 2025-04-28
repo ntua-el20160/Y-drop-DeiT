@@ -96,14 +96,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             # print("shape of outputs:", outputs.shape)
             #possibly bidirectional kl divergence loss multplied by a 
             if a != 0:
-                p_loss = F.kl_div(F.log_softmax(pred.float(), dim=-1), F.softmax(outputs.float(), dim=-1), reduction='none')
-                q_loss = F.kl_div(F.log_softmax(outputs.float(), dim=-1), F.softmax(pred.float(), dim=-1), reduction='none')
-                # print('p_loss:', p_loss.mean())
-                # print('q_loss:', q_loss.mean())
-                loss = criterion(outputs, targets) + a*(p_loss.mean()+q_loss.mean())/2
+                # 1) build safe probability vectors
+                prob_out  = F.softmax(outputs.float(), dim=-1).clamp(min=1e-8)
+                log_out   = prob_out.log()
+                prob_pred = F.softmax(pred.float(),    dim=-1).clamp(min=1e-8)
+                log_pred  = prob_pred.log()
 
+                # 2) one‐way KL with batch‐mean reduction
+                kl_out_to_pred = F.kl_div(log_pred,  prob_out,  reduction='batchmean')
+                kl_pred_to_out = F.kl_div(log_out,   prob_pred, reduction='batchmean')
+
+                # 3) symmetric KL
+                bi_kl = 0.5 * (kl_out_to_pred + kl_pred_to_out)
+
+                # 4) final loss
+                loss = criterion(outputs, targets) + a * bi_kl
             else:
-                loss = criterion(outputs, targets) 
+                loss = criterion(outputs, targets)
             if stats and batch_idx % 350 == 0:
                 model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350} ', output_dir / 'plots')
 
