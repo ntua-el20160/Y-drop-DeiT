@@ -115,7 +115,7 @@ class MyDropout(nn.Module):
 
         # Normalize scoring
 
-        normalized = (scoring - scoring.mean()) / scoring.std()
+        #normalized = (scoring - scoring.mean()) / scoring.std()
         # epsilon = 1e-6
         # s_min, s_max = scoring.min(), scoring.max()
         # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
@@ -184,7 +184,13 @@ class MyDropout(nn.Module):
             normalized = (scoring - scoring.mean()) / scoring.std()
             keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
-
+        
+        keep_prob = torch.nan_to_num(
+            keep_prob,
+            nan=self.base_keep,   # replace NaN with the default keep rate
+            posinf=1.0,           # clamp +∞ → 1
+            neginf=0.0            # clamp -∞ → 0
+        )
         # Step 3: Update scaling buffer and stats if needed
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:
             self.scaling = torch.full_like(keep_prob, self.base_keep)
