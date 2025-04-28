@@ -88,14 +88,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
                 pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq)
+                pred = pred.detach()
+                # print("shape of pred:", pred.shape)
 
             outputs = model(samples)
+            # print("shape of outputs:", outputs.shape)
             #possibly bidirectional kl divergence loss multplied by a 
             if a != 0:
-                p_loss = F.kl_div(F.log_softmax(pred, dim=-1), F.softmax(outputs, dim=-1), reduction='none')
-                q_loss = F.kl_div(F.log_softmax(outputs, dim=-1), F.softmax(pred, dim=-1), reduction='none')
-                print('p_loss:', p_loss.mean())
-                print('q_loss:', q_loss.mean())
+                p_loss = F.kl_div(F.log_softmax(pred.float(), dim=-1), F.softmax(outputs.float(), dim=-1), reduction='none')
+                q_loss = F.kl_div(F.log_softmax(outputs.float(), dim=-1), F.softmax(pred.float(), dim=-1), reduction='none')
+                # print('p_loss:', p_loss.mean())
+                # print('q_loss:', q_loss.mean())
                 loss = criterion(outputs, targets) + a*(p_loss.mean()+q_loss.mean())/2
 
             else:

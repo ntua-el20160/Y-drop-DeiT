@@ -149,7 +149,7 @@ class CNN6_S1(nn.Module):
         torch.cuda.empty_cache()
 
         self.train()
-        return pred
+        return outputs
     
     def use_normal_dropout(self):
         for drop in self.drop_list:
