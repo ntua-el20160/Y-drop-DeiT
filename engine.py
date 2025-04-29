@@ -76,7 +76,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     #next_batches = list(itertools.islice(new_iter, update_batches))
                     #a =0
                     next_batches = [(samples.clone(), targets.clone())]
-                    a = 1
+                    a = 0.1
                 else:
                     next_batches = []
                     a= 0
