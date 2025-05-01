@@ -262,7 +262,7 @@ def main(args):
                                                shuffle=False, num_workers=4, pin_memory=True)
     
 
-    #print(sub_dataset.shape())
+    #Create subdataset for conductance updates
     def preload_subdataset(subdataset):
         """
         Given a small subdataset (a torch.utils.data.Subset),
@@ -289,12 +289,14 @@ def main(args):
     # Set up optimizer and loss function.
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
+
     output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     # dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     # model(dummy_input)
     
+    #resume from a previous checkpoint
     if args.resume:
         print(f"Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
@@ -315,7 +317,8 @@ def main(args):
         start_epoch = 0
         cumulative_train_time = 0.0
         best_acc = 0.0
-        
+
+    # possibly scaling update frequency    
     if args.update_scaling == 'increasing':
 
         update_freq = 1

@@ -73,7 +73,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
-                    next_batches = list(itertools.islice(new_iter, update_batches))
+                    #next_batches = list(itertools.islice(new_iter, update_batches))
+                    next_batches = [ next(new_iter) ]
                     a =0
                     # next_batches = [(samples.clone(), targets.clone())]
                     # a = 0.1

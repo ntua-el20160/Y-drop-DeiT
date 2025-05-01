@@ -206,10 +206,13 @@ def main(args):
     # random.seed(seed)
 
     cudnn.benchmark = True
-
+    
+    # load train and test sets
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
+
+    #Create subdataset for conductance updates
     def preload_subdataset(subdataset):
         """
         Given a small subdataset (a torch.utils.data.Subset),
@@ -227,15 +230,6 @@ def main(args):
     else:
         cached_subdataset = None
     
-    if args.update_scaling == 'increasing':
-
-        update_freq = 1
-    else:
-        update_freq = args.update_freq
-    
-    effective_epochs = args.epochs - args.annealing_factor
-    step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1) 
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -266,6 +260,7 @@ def main(args):
         pin_memory=args.pin_mem, drop_last=False
     )
 
+    # Use of Mixup
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active:
@@ -274,7 +269,7 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    print(f"Creating model: {args.model}")
+
 #     model = create_model(
 #     args.model,
 #     pretrained=False,
@@ -283,6 +278,9 @@ def main(args):
 #     drop_path_rate=args.drop_path,
 #     drop_block_rate=args.drop_block,
 # )
+
+    #Create Model
+    print(f"Creating model: {args.model}")
     model = create_model(
     args.model,
     pretrained=False,
@@ -298,12 +296,13 @@ def main(args):
     n_steps=args.n_steps,
 )
 
-
     # TODO: finetuning
-
     model.to(device)
     dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     model(dummy_input)
+
+
+
     # for i, block in enumerate(model.blocks):
     #     print(f"[MyVisionTransformer] Block {i} attn_drop.p = {block.attn.attn_drop.p}")
     #     print(f"[MyVisionTransformer] Block {i} proj_drop.p = {block.attn.proj_drop.p}")
@@ -311,6 +310,9 @@ def main(args):
         print(f"Dropout rate: {drop.p}, mask type: {drop.mask_type}, "
               f"elasticity: {drop.elasticity}, scaler: {drop.scaler}")
     # print(f"[MyVisionTransformer] Dropout rate: {model.drop_rate}")
+
+
+    # Model ema
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -324,18 +326,21 @@ def main(args):
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
+
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
+    #learning rate schedule
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
+
+    # setup optimizer
     optimizer = create_optimizer(args, model)
     loss_scaler = NativeScaler()
-
     lr_scheduler, _ = create_scheduler(args, optimizer)
 
+    # setup loss function
     criterion = LabelSmoothingCrossEntropy()
-
     if args.mixup > 0.:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
@@ -348,6 +353,8 @@ def main(args):
     simple_output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    #resume from a previous checkpoint
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -385,6 +392,19 @@ def main(args):
         best_acc = 0.0
         patience_counter = 0
 
+    # possibly scaling update frequency
+    if args.update_scaling == 'increasing':
+
+        update_freq = 1
+    else:
+        update_freq = args.update_freq
+    
+    effective_epochs = args.epochs - args.annealing_factor
+    step_size = round(effective_epochs / args.update_scaling_steps)
+    denom = max(1, args.update_scaling_steps - 1)    
+
+
+    #evaluation only mode
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
