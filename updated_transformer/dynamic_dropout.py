@@ -92,7 +92,13 @@ class MyDropout(nn.Module):
         self.beta = new_beta
         self.initialized = True
         num_neurons = new_prev.numel()
-        self.random_neurons = np.random.choice(num_neurons, size=min(4, num_neurons), replace=False).tolist()
+        flat_idxs = np.random.choice(
+            num_neurons, size=min(4, num_neurons), replace=False
+        )
+        self.random_neurons = [
+            tuple(np.unravel_index(i, new_prev.shape))
+            for i in flat_idxs
+        ]
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
         self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
 
@@ -267,17 +273,27 @@ class MyDropout(nn.Module):
 
         hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
         self.scoring_hist += hist_scoring
-        for i, neuron in enumerate(self.random_neurons):
-            hist_scoring_neuron, _ = np.histogram(np.array([scoring_det[neuron].item()]), bins=bins_scoring)
+        # for i, neuron in enumerate(self.random_neurons):
+        #     hist_scoring_neuron, _ = np.histogram(np.array([scoring_det[neuron].item()]), bins=bins_scoring)
+        #     self.random_neuron_hists_scoring[i] += hist_scoring_neuron
+        for i, idx_tuple in enumerate(self.random_neurons):
+            # idx_tuple is e.g. (c,h,w) or (d,)
+            val = scoring_det[idx_tuple].item()
+            hist_scoring_neuron, _ = np.histogram([val], bins=bins_scoring)
             self.random_neuron_hists_scoring[i] += hist_scoring_neuron
         
         bins_keep = np.linspace(0.0, 0.8, 101)
 
         hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
-        for i, neuron in enumerate(self.random_neurons):
+        # for i, neuron in enumerate(self.random_neurons):
             
-            hist_keep_neuron, _ = np.histogram(np.array([keep_prob_det[neuron].item()]), bins=bins_keep)
+        #     hist_keep_neuron, _ = np.histogram(np.array([keep_prob_det[neuron].item()]), bins=bins_keep)
+        #     self.random_neuron_hists_keep[i] += hist_keep_neuron
+        for i, idx_tuple in enumerate(self.random_neurons):
+            val = keep_prob_det[idx_tuple].item()
+            hist_keep_neuron, _ = np.histogram([val], bins=bins_keep)
             self.random_neuron_hists_keep[i] += hist_keep_neuron
+
             # print("Neuron",neuron,"Keep rate: ",keep_prob_det[neuron].item())
             # print(f"Histogram o neuron {neuron} so far ", self.random_neuron_hists_keep[i])
         self.keep_hist += hist_keep
