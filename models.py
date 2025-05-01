@@ -74,6 +74,11 @@ class MyVisionTransformer(VisionTransformer):
     def clear_progression(self):
         for drop in self.drop_list:
             drop.clear_progression()
+    def plot_current_stats(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            block_num = i//4
+            layer_num = i%4
+            self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
