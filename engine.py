@@ -130,14 +130,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         is_second_order = False 
-        # loss_scaler(loss, optimizer, clip_grad=max_norm,
-        #            parameters=model.parameters(), create_graph=is_second_order)
-       
+
+        loss_scaler(
+        loss,
+        optimizer,
+        clip_grad=max_norm,
+        parameters=model.parameters(),
+        create_graph=is_second_order
+    )
+
         # optimizer.zero_grad()
-        loss.backward()
-        if max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        # loss.backward()
+        # if max_norm > 0:
+        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        # optimizer.step()
         torch.cuda.synchronize()
 
         if model_ema is not None:
