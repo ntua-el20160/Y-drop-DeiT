@@ -40,6 +40,7 @@ class Mlp(nn.Module):
             mask_type: Optional[str] = 'sigmoid',
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
+            smooth_scoring: Optional[bool] = False,
     ):
         super().__init__()
         out_features = out_features or in_features
@@ -54,7 +55,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
 
         if ydrop is True:
-            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler)
+            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler,smoothed=smooth_scoring)
         else:
             self.drop1 = nn.Dropout(drop_probs[0])
         
@@ -63,7 +64,7 @@ class Mlp(nn.Module):
         
 
         if ydrop is True:
-            self.drop2 = MyDropout(elasticity=elasticity, p=drop_probs[1], tied_layer=self.fc2, mask_type=mask_type, scaler=scaler)
+            self.drop2 = MyDropout(elasticity=elasticity, p=drop_probs[1], tied_layer=self.fc2, mask_type=mask_type, scaler=scaler,smoothed=smooth_scoring)
         else:
             self.drop2 = nn.Dropout(drop_probs[1])
             

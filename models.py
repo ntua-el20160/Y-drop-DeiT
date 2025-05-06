@@ -14,7 +14,7 @@ import copy
 from typing import Iterable
 from captum.attr import LayerConductance
 from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
-
+from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
 from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
@@ -79,7 +79,7 @@ class MyVisionTransformer(VisionTransformer):
             block_num = i//4
             layer_num = i%4
             self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1) -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -100,12 +100,22 @@ class MyVisionTransformer(VisionTransformer):
             pred = outputs.argmax(dim=1)
 
             #calculate conductunce for batch
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            if scoring_type == "Conductance":
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            elif scoring_type == "Sensitivity":
+                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            else:
+                print("Invalid scoring type. Using Conductance as default.")
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
-                score_mean = score.mean(dim=0)
+                #print(captum_attrs)
+                score_mean = score if scoring_type == "Sensitivity" else score.mean(dim=0)
+
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
                     model_clone.scores[f'drop_{i}'] = score_mean.clone()
@@ -156,6 +166,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    smooth_scoring = kwargs.pop('smooth_scoring', False)
 
     print("[Registered Model - Tiny] drop_rate:", drop)
     print("[Registered Model - Tiny] ydrop:", ydrop)
@@ -163,6 +174,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model - Tiny] elasticity:", elasticity)
     print("[Registered Model - Tiny] scaler:", scaler)
     print("[Registered Model - Tiny] n_steps:", n_steps)
+    print("[Registered Model - Tiny] smooth_scoring:", smooth_scoring)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -177,6 +189,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        smooth_scoring=smooth_scoring,
     )
     mlp_partial = partial(
         Mlp,
@@ -184,7 +197,9 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         mask_type=mask_type,
         elasticity=elasticity,
         scaler=scaler,
-        drop=drop,  # Use the same drop or separate if desired
+        drop=drop,
+        smooth_scoring=smooth_scoring,  # Use the same drop or separate if desired  
+        # Use the same drop or separate if desired
     )
 
     # Build MyVisionTransformer using your partials
@@ -229,6 +244,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    smooth_scoring = kwargs.pop('smooth_scoring', False)
 
     print("[Registered Model - Small] drop_rate:", drop)
     print("[Registered Model - Small] ydrop:", ydrop)
@@ -236,6 +252,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model - Small] elasticity:", elasticity)
     print("[Registered Model - Small] scaler:", scaler)
     print("[Registered Model - Small] n_steps:", n_steps)
+    print("[Registered Model - Small] smooth_scoring:", smooth_scoring)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -250,6 +267,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        smooth_scoring=smooth_scoring, 
     )
     mlp_partial = partial(
         Mlp,
@@ -258,6 +276,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         elasticity=elasticity,
         scaler=scaler,
         drop=drop,
+        smooth_scoring=smooth_scoring,  
     )
 
     # Build MyVisionTransformer using your partials
@@ -301,6 +320,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    smooth_scoring = kwargs.pop('smooth_scoring', False)
 
     print("[Registered Model] drop_rate:", drop)
     print("[Registered Model] ydrop:", ydrop)
@@ -308,6 +328,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model] elasticity:", elasticity)
     print("[Registered Model] scaler:", scaler)
     print("[Registered Model] n_steps:", n_steps)
+    print("[Registered Model] smooth_scoring:", smooth_scoring)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -322,6 +343,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        smooth_scoring=smooth_scoring,  # Use the same drop or separate if desired
     )
     mlp_partial = partial(
         Mlp,
@@ -329,7 +351,8 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         mask_type=mask_type,
         elasticity=elasticity,
         scaler=scaler,
-        drop=drop,  # use the same drop for MLP as well, or pass differently
+        drop=drop,
+        smooth_scoring= smooth_scoring  # use the same drop for MLP as well, or pass differently
     )
 
     model = MyVisionTransformer(

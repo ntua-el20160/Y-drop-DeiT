@@ -17,7 +17,7 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 from updated_transformer.mlp import Mlp
 from updated_transformer.attention import Attention
-
+#from updated_transformer.attention2 import Attention
 
 """DropPath and LayerScale may need changes"""
 
@@ -42,6 +42,7 @@ class Block(nn.Module):
             mask_type: Optional[str] = 'sigmoid',
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
+            smooth_scoring: Optional[bool] = False,
 
 
     ) -> None:
@@ -62,6 +63,7 @@ class Block(nn.Module):
             mask_type=mask_type,
             elasticity=elasticity,
             scaler=scaler,
+            smooth_scoring=smooth_scoring,
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -76,12 +78,15 @@ class Block(nn.Module):
             mask_type=mask_type,
             elasticity=elasticity,
             scaler=scaler,
+            smooth_scoring=smooth_scoring,
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.selected_layers = [self.attn.attention_identity_layer,self.attn.proj,self.mlp.fc1,self.mlp.fc2]
         self.drop_list = [self.attn.attn_drop,self.attn.proj_drop,self.mlp.drop1,self.mlp.drop2]
+        # self.selected_layers = [self.attn.attn_module,self.attn.proj,self.mlp.fc1,self.mlp.fc2]
+        # self.drop_list = [self.attn.attn_module.attn_drop,self.attn.proj_drop,self.mlp.drop1,self.mlp.drop2]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))

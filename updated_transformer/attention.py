@@ -17,34 +17,6 @@ from timm.models import register_model
 from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 from updated_transformer.dynamic_dropout import MyDropout
 
-"""DropPath and LayerScale may need changes"""
-# def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
-#         is_causal=False, scale=None, enable_gqa=False,train =True) -> torch.Tensor:
-#     L, S = query.size(-2), key.size(-2)
-#     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
-#     attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
-#     if is_causal:
-#         assert attn_mask is None
-#         temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
-#         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-#         attn_bias.to(query.dtype)
-
-#     if attn_mask is not None:
-#         if attn_mask.dtype == torch.bool:
-#             attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
-#         else:
-#             attn_bias = attn_mask + attn_bias
-
-#     if enable_gqa:
-#         key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
-#         value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
-
-#     attn_weight = query @ key.transpose(-2, -1) * scale_factor
-#     attn_weight += attn_bias
-#     attn_weight = torch.softmax(attn_weight, dim=-1)
-#     attn_weight = torch.dropout(attn_weight, dropout_p, train=train)
-#     return attn_weight @ value,attn_weight
-
 
 class Attention(nn.Module):
     fused_attn: Final[bool]
@@ -63,6 +35,7 @@ class Attention(nn.Module):
             mask_type: Optional[str] = 'sigmoid',
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
+            smooth_scoring: Optional[bool] = False,
     ) -> None:
         super().__init__()
 
@@ -81,13 +54,13 @@ class Attention(nn.Module):
 
         
         if ydrop is True:
-            self.attn_drop = MyDropout(elasticity=elasticity, p=attn_drop, tied_layer=self.attention_identity_layer, mask_type=mask_type, scaler=scaler)
+            self.attn_drop = MyDropout(elasticity=elasticity, p=attn_drop, tied_layer=self.attention_identity_layer, mask_type=mask_type, scaler=scaler,smoothed=smooth_scoring)
         else:
             self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
 
         if ydrop is True:
-            self.proj_drop = MyDropout(elasticity=elasticity, p=proj_drop, tied_layer=self.proj, mask_type=mask_type, scaler=scaler)
+            self.proj_drop = MyDropout(elasticity=elasticity, p=proj_drop, tied_layer=self.proj, mask_type=mask_type, scaler=scaler,smoothed=smooth_scoring)
         else:
             self.proj_drop = nn.Dropout(proj_drop)
 
@@ -98,18 +71,13 @@ class Attention(nn.Module):
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
-        if self.fused_attn:
-            x,_ = F.scaled_dot_product_attention(
-                q, k, v,
-                dropout_p=self.attn_drop.p if self.training else 0.,
-            )
-        else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            attn =self.attention_identity_layer(attn)
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
+
+        q = q * self.scale
+        attn = q @ k.transpose(-2, -1)
+        attn =self.attention_identity_layer(attn)
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)

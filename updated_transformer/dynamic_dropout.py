@@ -24,7 +24,7 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 
 class MyDropout(nn.Module):
-    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid"):
+    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid",smoothed:bool = False):
         """
         p: dropout probability.
         elasticity: how quickly the dropout mask changes.
@@ -49,12 +49,17 @@ class MyDropout(nn.Module):
         self.base = False
         self.base_keep = 1 - self.p
         self.tied_layer = tied_layer  # Store the tied layer for reference.
+        self.smoothed = smoothed  # Flag to indicate if scoring should be updated.
+        self.starting = False
 
         # Buffers will be lazily initialized based on the tied layer's output.
  
         self.register_buffer("previous", torch.empty(0))
         self.register_buffer("scaling", torch.empty(0))
         self.register_buffer("scoring", torch.empty(0))
+        if self.smoothed:
+            self.register_buffer("smoothed_scoring", torch.empty(0))
+            self.register_buffer("smoothed_uncertainty", torch.empty(0))
         self.beta = torch.tensor(0.0)
         self.initialized = False
 
@@ -89,6 +94,9 @@ class MyDropout(nn.Module):
         self.previous = new_prev
         self.scaling = new_scaling
         self.scoring = new_scoring
+        if self.smoothed:
+            self.smoothed_scoring = torch.zeros(feature_shape, device=device)
+            self.smoothed_uncertainty = torch.zeros(feature_shape, device=device)   
         self.beta = new_beta
         self.initialized = True
         num_neurons = new_prev.numel()
@@ -125,17 +133,31 @@ class MyDropout(nn.Module):
         # epsilon = 1e-6
         # s_min, s_max = scoring.min(), scoring.max()
         # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
-        
+
+        if self.smoothed and self.starting:
+            # Update smoothed scoring and uncertainty
+            self.smoothed_scoring.copy_(self.smoothed_scoring * 0.85 + scoring * 0.15)
+            self.smoothed_uncertainty.copy_(self.smoothed_uncertainty * 0.85 + torch.abs(scoring - self.smoothed_scoring)* 0.15)
+            scoring_final = self.smoothed_scoring*self.smoothed_uncertainty
+        else:
+            scoring_final = scoring
+            self.starting = True
+
+        self.scoring.copy_(scoring_final)
+        el  = min(self.elasticity*update_freq,1.0)
+
+
+
         #Different mask types
         if self.mask_type == "sigmoid":
             # Original approach
-            scoring = -scoring
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            scoring_final = -scoring_final
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "sigmoid_inverse":
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             # Example smaller slope + random noise
             keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
@@ -143,15 +165,15 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            scoring = -scoring
+            scoring_final = -scoring_final
 
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
-            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+            s_min, s_max = scoring_final.min(), scoring_final.max()
+            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
         
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -160,12 +182,12 @@ class MyDropout(nn.Module):
         elif self.mask_type == "softmax_inverse":
             # Make sure scoring is not huge in magnitude.
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
-            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+            s_min, s_max = scoring_final.min(), scoring_final.max()
+            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
         
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -173,12 +195,12 @@ class MyDropout(nn.Module):
         elif self.mask_type == "softmax_absolute":
             # Make sure scoring is not huge in magnitude.
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
-            normalized = torch.abs(2 *self.scaler* (scoring - s_min) / (s_max - s_min + epsilon) - self.scaler)
+            s_min, s_max = scoring_final.min(), scoring_final.max()
+            normalized = torch.abs(2 *self.scaler* (scoring_final - s_min) / (s_max - s_min + epsilon) - self.scaler)
 
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -187,7 +209,7 @@ class MyDropout(nn.Module):
 
         else:
             # Fallback or default
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
         
@@ -203,22 +225,18 @@ class MyDropout(nn.Module):
         
 
         if stats:
-            self.update_aggregated_statistics(scoring, keep_prob)
+            self.update_aggregated_statistics(self.scoring, keep_prob)
         
-        el  = min(self.elasticity*update_freq,1.0)
         # Momentum-like update
         self.scaling = self.scaling * (1 - el) + keep_prob * el
         self.previous.copy_(keep_prob)
-        self.scoring.copy_(scoring)
-
 
 
 
     def forward(self, input):
         
         if not self.initialized:
-            feature_shape = input.shape[1:]  # Exclude the batch dimension.
-            self.initialize_buffers(feature_shape, input.device)
+            self.initialize_buffers(input.shape[1:], input.device)  # Exclude the batch dimension.
 
         if not self.training:
             return input

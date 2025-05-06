@@ -22,10 +22,10 @@ import copy
 from typing import Iterable
 from captum.attr import LayerConductance
 from evaluate_gradients.MultiLayerConductance import MultiLayerConductance
-
+from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 
 class CNN6_S1(nn.Module):
-    def __init__(self, num_classes=10, use_custom_dropout=True, elasticity=1.0, p=0.1, n_steps=5,mask_type = 'sigmoid',scaler = 1.0):
+    def __init__(self, num_classes=10, use_custom_dropout=True, elasticity=1.0, p=0.1, n_steps=5,mask_type = 'sigmoid',scaler = 1.0,smooth_scoring = False):
         
         super(CNN6_S1, self).__init__()
         self.n_steps = n_steps
@@ -52,7 +52,7 @@ class CNN6_S1(nn.Module):
         self.selected_layers = [self.fc1, self.fc2]
         if use_custom_dropout:
             self.drop_list = nn.ModuleList([
-                MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler)
+                MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler, smoothed = smooth_scoring)
                 for layer in self.selected_layers
             ])
         else:
@@ -86,7 +86,7 @@ class CNN6_S1(nn.Module):
         x = self.fc3(x)
         return x
 
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1) -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,update_freq: int =1,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -107,12 +107,21 @@ class CNN6_S1(nn.Module):
             pred = outputs.argmax(dim=1)
 
             #calculate conductunce for batch
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            if scoring_type == "Conductance":
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            elif scoring_type == "Sensitivity":
+                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+
+            else:
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
-                score_mean = score.mean(dim=0)
+                score_mean = score if scoring_type == "Sensitivity" else score.mean(dim=0)
+
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
                     model_clone.scores[f'drop_{i}'] = score_mean.clone()
@@ -226,7 +235,12 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-
+    parser.add_argument('--smooth_scoring', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
+    parser.add_argument('--no-smooth_scoring', dest='smooth_scoring', action='store_false',
+                        help='Disable smooth scoring for custom dropout')
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
+                        type=str, help='Scoring type for custom dropout')
     return parser
 
 def main(args):
@@ -234,9 +248,9 @@ def main(args):
     torch.manual_seed(args.seed)
     
     device = torch.device(args.device)
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    # seed = args.seed + utils.get_rank()
+    # torch.manual_seed(seed)
+    np.random.seed(args.seed)
     # Data augmentation and normalization for CIFAR10.
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -282,8 +296,10 @@ def main(args):
 
   
     model = CNN6_S1(num_classes=10, use_custom_dropout=args.ydrop,
-                elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
+                elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler,smooth_scoring = args.smooth_scoring)
     model = model.to(device)
+    dummy_input = torch.randn(1, 3, 32, 32, device=device)
+    model(dummy_input)
 
     
     # Set up optimizer and loss function.
@@ -377,6 +393,9 @@ def main(args):
             stats = stats,
             update_data_loader = cached_subdataset,
             output_dir = output_dir,
+            scoring_type = args.scoring_type,
+            help_par = 0
+
         )
 
         epoch_time = time.time() - start_time

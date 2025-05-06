@@ -49,7 +49,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,output_dir: str = None,) -> dict:
+                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
+                    output_dir: str = None,scoring_type:str ="Conductance",help_par:int =1) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -58,7 +59,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
-
+    update_scaling = data_loader.batch_size //32
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     a= 0
@@ -94,7 +95,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq)
+                pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq*update_scaling,scoring_type=scoring_type)
                 pred = pred.detach()
                 # print("shape of pred:", pred.shape)
 
@@ -135,21 +136,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         is_second_order = False 
-
-        loss_scaler(
-        loss,
-        optimizer,
-        clip_grad=max_norm,
-        parameters=model.parameters(),
-        create_graph=is_second_order
-    )
-
-        # optimizer.zero_grad()
-        # loss.backward()
-        # if max_norm > 0:
-        #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        # optimizer.step()
-        torch.cuda.synchronize()
+        if help_par == 1:
+            loss_scaler(
+            loss,
+            optimizer,
+            clip_grad=max_norm,
+            parameters=model.parameters(),
+            create_graph=is_second_order
+        )
+        else:
+            loss.backward()
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            optimizer.step()
+            torch.cuda.synchronize()
 
         if model_ema is not None:
             model_ema.update(model)

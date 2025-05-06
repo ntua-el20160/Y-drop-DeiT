@@ -188,7 +188,12 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-
+    parser.add_argument('--smooth_scoring', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
+    parser.add_argument('--no-smooth_scoring', dest='smooth_scoring', action='store_false',
+                        help='Disable smooth scoring for custom dropout')
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
+                        type=str, help='Scoring type for custom dropout')
     return parser
 
 
@@ -200,9 +205,10 @@ def main(args):
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    torch.manual_seed(args.seed)
+
+    np.random.seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     # random.seed(seed)
 
     cudnn.benchmark = True
@@ -294,6 +300,7 @@ def main(args):
     elasticity=args.elasticity,
     scaler=args.scaler,
     n_steps=args.n_steps,
+    smooth_scoring=args.smooth_scoring,
 )
 
     # TODO: finetuning
@@ -458,6 +465,8 @@ def main(args):
             stats = stats,
             update_data_loader = cached_subdataset,
             output_dir = output_dir,
+            scoring_type = args.scoring_type,
+            help_par = 1
         )
 
         
