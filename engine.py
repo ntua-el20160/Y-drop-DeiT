@@ -59,7 +59,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
-    update_scaling = data_loader.batch_size //32
+    update_scaling = data_loader.batch_size //(32*update_batches)
+    
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     a= 0
@@ -75,15 +76,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
-                    #next_batches = list(itertools.islice(new_iter, update_batches))
-                    full_samples, full_targets = next(new_iter)
-                    sub_samples = full_samples[:32]
-                    sub_targets = full_targets[:32]
-                    next_batches = [(sub_samples, sub_targets)]
-                    #next_batches = [ next(new_iter) ]
+                    helper = data_loader.batch_size//32
+                    # full_samples, full_targets = next(new_iter)
+                    next_batches = []
+                    big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
+                    for i in range(update_batches):
+                        b = i//helper
+                        ig = i%helper
+                        full_samples, full_targets = big_batches[b]
+                        sub_samples = full_samples[32*ig:32*(ig+1)]
+                        sub_targets = full_targets[32*ig:32*(ig+1)]
+                        next_batches.append((sub_samples.clone(), sub_targets.clone()))
                     a =0
-                    # next_batches = [(samples.clone(), targets.clone())]
-                    # a = 0.1
+
                 else:
                     next_batches = []
                     a= 0

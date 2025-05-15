@@ -132,7 +132,7 @@ class CNN6_S1(nn.Module):
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
-                model_clone.scores[f'drop_{i}'],
+                model_clone.scores[f'drop_{i}']/len(batches),
                 stats=stats,
                 update_freq=update_freq,
             )
