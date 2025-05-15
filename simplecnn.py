@@ -264,12 +264,27 @@ def main(args):
         transforms.Normalize((0.4914, 0.4822, 0.4465),
                              (0.2023, 0.1994, 0.2010)),
     ])
-    
-    train_dataset = torchvision.datasets.CIFAR10(root=args.data_path, train=True, download=True,
-                                                 transform=transform_train)
-    test_dataset  = torchvision.datasets.CIFAR10(root=args.data_path, train=False, download=True,
-                                                 transform=transform_test)
-    
+# Replace these two lines:
+# train_dataset = torchvision.datasets.CIFAR10(...)
+# test_dataset  = torchvision.datasets.CIFAR10(...)
+
+    if args.data_set == 'CIFAR100':
+        DatasetClass = torchvision.datasets.CIFAR100
+        num_classes = 100
+    else:
+        DatasetClass = torchvision.datasets.CIFAR10
+        num_classes = 10
+
+    train_dataset = DatasetClass(
+        root=args.data_path, train=True, download=True,
+        transform=transform_train
+    )
+    test_dataset = DatasetClass(
+        root=args.data_path, train=False, download=True,
+        transform=transform_test
+    )
+
+        
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                shuffle=True, num_workers=4, pin_memory=True,drop_last=True)
     test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
@@ -295,7 +310,7 @@ def main(args):
         cached_subdataset = None
 
   
-    model = CNN6_S1(num_classes=10, use_custom_dropout=args.ydrop,
+    model = CNN6_S1(num_classes=num_classes, use_custom_dropout=args.ydrop,
                 elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler,smooth_scoring = args.smooth_scoring)
     model = model.to(device)
     dummy_input = torch.randn(1, 3, 32, 32, device=device)
@@ -464,4 +479,8 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('SimpleCNNMLP Training Script', parents=[get_args_parser()])
     args = parser.parse_args()
+    if args.data_set == 'CIFAR100':
+        num_classes = 100
+    else:
+        num_classes = 10
     main(args)
