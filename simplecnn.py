@@ -495,10 +495,6 @@ def main(args):
             best_loss = test_loss
             checkpoint['lowest_loss'] = best_loss
             
-        
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
-        
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
             patience_counter = 0  # reset early stopping counter
@@ -508,6 +504,10 @@ def main(args):
         else:
             patience_counter += 1
             checkpoint['patience_counter'] = patience_counter
+          
+        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
+        
         torch.save(checkpoint, output_dir / "checkpoint.pth")
 
 
