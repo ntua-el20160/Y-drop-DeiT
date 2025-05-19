@@ -177,7 +177,7 @@ def get_args_parser():
                          help ='intermediate steps for conductance calculation')
     parser.add_argument('--update_freq',type=int,default = 1,
                             help ='intermediate steps for conductance calculation')
-    parser.add_argument('--early_stopping_patience', type=int, default=10,
+    parser.add_argument('--early_stopping_patience', type=int, default=30,
                         help='Number of epochs with no improvement in eval loss before early stopping')
     parser.add_argument('--plot_freq', default=5, type=int, help='plot frequency')
     parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
@@ -377,32 +377,40 @@ def main(args):
 
     #resume from a previous checkpoint
     if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+        try:
+            if args.resume.startswith('https'):
+                checkpoint = torch.hub.load_state_dict_from_url(
+                    args.resume, map_location='cpu', check_hash=True)
+            else:
+                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
 
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            history = checkpoint.get('history', {})
-            if history:
-                for i, drop in enumerate(model.drop_list):
-                    drop_history = history.get(f'drop{i}', {})
-                    drop.progression_keep = drop_history.get('progression_keep', [])
-                    drop.progression_scoring = drop_history.get('progression_scoring', [])
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-        
-        best_loss = checkpoint.get('lowest_loss', float('inf'))
-        cumulative_train_time = checkpoint.get('train_time', 0.0)
-        saved_epoch = checkpoint.get('epoch', 0)
-        if saved_epoch >0:
-            saved_epoch+=1
-        best_acc = checkpoint.get('best_acc', 0.0)
-        patience_counter = checkpoint.get('patience_counter', 0)
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                history = checkpoint.get('history', {})
+                if history:
+                    for i, drop in enumerate(model.drop_list):
+                        drop_history = history.get(f'drop{i}', {})
+                        drop.progression_keep = drop_history.get('progression_keep', [])
+                        drop.progression_scoring = drop_history.get('progression_scoring', [])
+                if args.model_ema:
+                    utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+            
+            best_loss = checkpoint.get('lowest_loss', float('inf'))
+            cumulative_train_time = checkpoint.get('train_time', 0.0)
+            saved_epoch = checkpoint.get('epoch', 0)
+            if saved_epoch >0:
+                saved_epoch+=1
+            best_acc = checkpoint.get('best_acc', 0.0)
+            patience_counter = checkpoint.get('patience_counter', 0)
+        except Exception as e:
+            print(f"Warning: could not resume from '{args.resume}' ({e}). Starting from scratch.")
+            best_loss = float('inf')
+            saved_epoch = 0
+            cumulative_train_time = 0.0
+            best_acc = 0.0
+            patience_counter = 0
 
 
 
@@ -504,10 +512,7 @@ def main(args):
         
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
-        
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
-        
+
         checkpoint ={
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -533,11 +538,16 @@ def main(args):
             best_loss = test_loss
             checkpoint['lowest_loss'] = best_loss
             patience_counter = 0  # reset early stopping counter
+            checkpoint['patience_counter'] = patience_counter
             if args.output_dir:  
                 utils.save_on_master(checkpoint, output_dir / 'best.pth')
         else:
             patience_counter += 1
-
+            checkpoint['patience_counter'] = patience_counter
+                
+        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
+        
         if args.output_dir:
             utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')
         
@@ -562,9 +572,7 @@ def main(args):
         #         'patience_counter': patience_counter
         #     }, checkpoint_path)
 
-        if patience_counter >= args.early_stopping_patience:
-            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
-            break
+        
 
         log_stats = {
             'epoch': epoch,
@@ -574,11 +582,16 @@ def main(args):
             'best_acc': best_acc,
             'test_loss': test_stats.get('loss', 0),
             'best_loss': best_loss,
+            'patience_counter': patience_counter,
+
         }
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+        if patience_counter >= args.early_stopping_patience:
+            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
+            break
 
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}%. Total training time: {total_time_str}")

@@ -245,7 +245,8 @@ def get_args_parser():
                         type=str, help='Scoring type for custom dropout')
     parser.add_argument('--same_batch', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
-    
+    parser.add_argument('--early_stopping_patience', type=int, default=30,
+                        help='Number of epochs with no improvement in eval loss before early stopping')
     return parser
 
 def main(args):
@@ -347,25 +348,42 @@ def main(args):
     
     #resume from a previous checkpoint
     if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0) + 1
-        print(f"Resumed at epoch {start_epoch}")
-        cumulative_train_time = checkpoint['train_time']
-        best_acc = checkpoint['best_acc']
-        history = checkpoint.get('history', {})
-        if history:
-            for i, drop in enumerate(model.drop_list):
-                drop_history = history.get(f'drop{i}', {})
-                drop.progression_keep = drop_history.get('progression_keep', [])
-                drop.progression_scoring = drop_history.get('progression_scoring', [])
+        try:
+            print(f"Resuming from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            print(f"Resumed at epoch {start_epoch}")
+            cumulative_train_time = checkpoint['train_time']
+            best_acc = checkpoint['best_acc']
+            history = checkpoint.get('history', {})
+            patience_counter = checkpoint.get('patience_counter', 0)
+            best_loss = checkpoint.get('lowest_loss', float('inf'))
+
+
+            if history:
+                for i, drop in enumerate(model.drop_list):
+                    drop_history = history.get(f'drop{i}', {})
+                    drop.progression_keep = drop_history.get('progression_keep', [])
+                    drop.progression_scoring = drop_history.get('progression_scoring', [])
+        except Exception as e:
+            print(f"Warning: could not resume from '{args.resume}' ({e}). Starting from scratch.")
+            start_epoch = 0
+            cumulative_train_time = 0.0
+            best_acc = 0.0
+            history = {}
+            best_loss = float('inf')
+            patience_counter = 0
+
 
     else:
         start_epoch = 0
         cumulative_train_time = 0.0
         best_acc = 0.0
+        history = {}
+        patience_counter = 0
+        best_loss = float('inf')
 
     # possibly scaling update frequency    
     if args.update_scaling == 'increasing':
@@ -438,9 +456,10 @@ def main(args):
         
         # Evaluate on the test set.
         test_stats = evaluate(test_loader, model, device)
+        test_acc = test_stats.get('acc1', 0.0)
+        test_loss = test_stats.get('loss', 0.0)
+
         
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
         
         if check and stats:
             model.update_progression()
@@ -454,11 +473,14 @@ def main(args):
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'epoch': epoch,
-                'test_acc': best_acc,
+                'test_acc': test_acc,
                 'train_stats': train_stats,
                 'test_stats': test_stats,
                 'train_time': cumulative_train_time,
-                'best_acc': best_acc,  
+                'best_acc': best_acc, 
+                'test_loss': test_loss,
+                'lowest_loss': best_loss, 
+                'patience_counter': patience_counter,
             }
         if args.ydrop:
             checkpoint['history'] = {}
@@ -469,6 +491,18 @@ def main(args):
                     }    
 
         # Save checkpoint if a new best accuracy is reached.
+        if test_loss < best_loss:
+            best_loss = test_loss
+            checkpoint['lowest_loss'] = best_loss
+            patience_counter = 0  # reset early stopping counter
+            checkpoint['patience_counter'] = patience_counter
+        else:
+            patience_counter += 1
+            checkpoint['patience_counter'] = patience_counter
+        
+        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
+        
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
             checkpoint['best_acc'] = best_acc
@@ -483,10 +517,16 @@ def main(args):
             'test_acc': test_stats.get('acc1', 0),
             'time': cumulative_train_time,
             'best_acc': best_acc,
+            'test_loss': test_stats.get('loss', 0),
+            'best_loss': best_loss,
+            'patience_counter': patience_counter,
         }
 
         with (output_dir/ "log.txt").open("a") as f:
             f.write(json.dumps(log_stats) + "\n")
+        if patience_counter >= args.early_stopping_patience:
+            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
+            break
     
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}%. Total training time: {total_time_str}")
