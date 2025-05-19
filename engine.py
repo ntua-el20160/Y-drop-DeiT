@@ -50,7 +50,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
-                    output_dir: str = None,scoring_type:str ="Conductance",help_par:int =1) -> dict:
+                    output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -64,7 +64,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     a= 0
-    if check:
+    if check and not same_batch and (update_data_loader == None):
+        # Create a new iterator for the data loader.
         new_iter = iter(data_loader)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
@@ -79,7 +80,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     helper = data_loader.batch_size//32
                     # full_samples, full_targets = next(new_iter)
                     next_batches = []
-                    big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
+                    if same_batch:
+                        full_samples = [(samples.clone(), targets.clone())]
+                    else:
+                        big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
                     for i in range(update_batches):
                         b = i//helper
                         ig = i%helper
@@ -100,7 +104,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq*update_scaling,scoring_type=scoring_type)
+                pred = model.calculate_scores(next_batches,device,stats=stats,update_freq=update_freq,scoring_type=scoring_type)
                 pred = pred.detach()
                 # print("shape of pred:", pred.shape)
 

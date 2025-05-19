@@ -11,7 +11,7 @@ import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
-
+import random
 from pathlib import Path
 
 from timm.data import Mixup
@@ -194,6 +194,9 @@ def get_args_parser():
                         help='Disable smooth scoring for custom dropout')
     parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
                         type=str, help='Scoring type for custom dropout')
+    parser.add_argument('--same_batch', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
+    
     return parser
 
 
@@ -202,17 +205,28 @@ def main(args):
 
     print(args)
 
-    device = torch.device(args.device)
+    seed = args.seed
 
-    # fix the seed for reproducibility
-    torch.manual_seed(args.seed)
+    # 1. Python built-in RNG
+    random.seed(seed)
+    # 2. NumPy RNG
+    np.random.seed(seed)
+    # 3. Torch CPU RNG
+    torch.manual_seed(seed)
+    # 4. Torch CUDA RNGs (if you have GPUs)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
-    np.random.seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    # 5. Enforce deterministic behavior in cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     # random.seed(seed)
 
-    cudnn.benchmark = True
-    
+    #cudnn.benchmark = True
+    device = torch.device(args.device)
+
     # load train and test sets
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
@@ -466,6 +480,7 @@ def main(args):
             update_data_loader = cached_subdataset,
             output_dir = output_dir,
             scoring_type = args.scoring_type,
+            same_batch = args.same_batch,
             help_par = 1
         )
 

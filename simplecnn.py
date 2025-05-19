@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 import utils
 import numpy as np
+import random
+
 
 import torch
 import torch.nn as nn
@@ -241,16 +243,32 @@ def get_args_parser():
                         help='Disable smooth scoring for custom dropout')
     parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
                         type=str, help='Scoring type for custom dropout')
+    parser.add_argument('--same_batch', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
+    
     return parser
 
 def main(args):
-    # Set the random seed for reproducibility.
-    torch.manual_seed(args.seed)
-    
+    seed = args.seed
+
+    # 1. Python built-in RNG
+    random.seed(seed)
+    # 2. NumPy RNG
+    np.random.seed(seed)
+    # 3. Torch CPU RNG
+    torch.manual_seed(seed)
+    # 4. Torch CUDA RNGs (if you have GPUs)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    # 5. Enforce deterministic behavior in cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    #torch.backends.cudnn.benchmark = True
+
+
     device = torch.device(args.device)
-    # seed = args.seed + utils.get_rank()
-    # torch.manual_seed(seed)
-    np.random.seed(args.seed)
     # Data augmentation and normalization for CIFAR10.
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -409,6 +427,7 @@ def main(args):
             update_data_loader = cached_subdataset,
             output_dir = output_dir,
             scoring_type = args.scoring_type,
+            same_batch = args.same_batch,
             help_par = 0
 
         )
