@@ -81,7 +81,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     # full_samples, full_targets = next(new_iter)
                     next_batches = []
                     if same_batch:
-                        full_samples = [(samples.clone(), targets.clone())]
+                        big_batches = [(samples.clone(), targets.clone())]
                     else:
                         big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
                     for i in range(update_batches):
