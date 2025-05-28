@@ -14,7 +14,7 @@ import copy
 from typing import Iterable
 from captum.attr import LayerConductance
 from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
-
+from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
 from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
@@ -70,11 +70,18 @@ class MyVisionTransformer(VisionTransformer):
             block_num = i//4
             layer_num = i%4
             self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" Block_{block_num}_layer_{layer_num}")
-
+    
     def clear_progression(self):
         for drop in self.drop_list:
             drop.clear_progression()
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
+    
+    def plot_current_stats(self, epoch_label, save_dir=None):
+        for i,_ in enumerate(self.drop_list):
+            block_num = i//4
+            layer_num = i%4
+            self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
+   
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -95,12 +102,22 @@ class MyVisionTransformer(VisionTransformer):
             pred = outputs.argmax(dim=1)
 
             #calculate conductunce for batch
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            if scoring_type == "Conductance":
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            elif scoring_type == "Sensitivity":
+                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            else:
+                print("Invalid scoring type. Using Conductance as default.")
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
-                score_mean = score.mean(dim=0)
+                #score_mean = score.mean(dim=0)
+                score_mean = score if scoring_type == "Sensitivity" else score.mean(dim=0)
+
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
                     model_clone.scores[f'drop_{i}'] = score_mean.clone()
@@ -110,7 +127,7 @@ class MyVisionTransformer(VisionTransformer):
 
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
-            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}'], stats=stats)
+            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}']/len(batches), stats=stats)
 
 
 

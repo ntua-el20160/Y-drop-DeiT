@@ -11,7 +11,7 @@ import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
-
+import random
 from pathlib import Path
 
 from timm.data import Mixup
@@ -188,7 +188,10 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
+                        type=str, help='Scoring type for custom dropout')
+    parser.add_argument('--same_batch', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
     return parser
 
 
@@ -197,15 +200,36 @@ def main(args):
 
     print(args)
 
-    device = torch.device(args.device)
+    # device = torch.device(args.device)
 
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
+    # # fix the seed for reproducibility
+    # seed = args.seed + utils.get_rank()
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
+    # # random.seed(seed)
+
+    # cudnn.benchmark = True
+    seed = args.seed
+
+    # 1. Python built-in RNG
+    random.seed(seed)
+    # 2. NumPy RNG
     np.random.seed(seed)
+    # 3. Torch CPU RNG
+    torch.manual_seed(seed)
+    # 4. Torch CUDA RNGs (if you have GPUs)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    # 5. Enforce deterministic behavior in cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     # random.seed(seed)
 
-    cudnn.benchmark = True
+    #cudnn.benchmark = True
+    device = torch.device(args.device)
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
@@ -226,12 +250,6 @@ def main(args):
         cached_subdataset = preload_subdataset(sub_dataset)
     else:
         cached_subdataset = None
-    
-    if args.update_scaling == 'increasing':
-
-        update_freq = 1
-    else:
-        update_freq = args.update_freq
     
     effective_epochs = args.epochs - args.annealing_factor
     step_size = round(effective_epochs / args.update_scaling_steps)
@@ -274,7 +292,6 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    print(f"Creating model: {args.model}")
 #     model = create_model(
 #     args.model,
 #     pretrained=False,
@@ -283,6 +300,8 @@ def main(args):
 #     drop_path_rate=args.drop_path,
 #     drop_block_rate=args.drop_block,
 # )
+    print(f"Creating model: {args.model}")
+
     model = create_model(
     args.model,
     pretrained=False,
@@ -349,32 +368,40 @@ def main(args):
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
+        try:
+            if args.resume.startswith('https'):
+                checkpoint = torch.hub.load_state_dict_from_url(
+                    args.resume, map_location='cpu', check_hash=True)
+            else:
+                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
 
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            history = checkpoint.get('history', {})
-            if history:
-                for i, drop in enumerate(model.drop_list):
-                    drop_history = history.get(f'drop{i}', {})
-                    drop.progression_keep = drop_history.get('progression_keep', [])
-                    drop.progression_scoring = drop_history.get('progression_scoring', [])
-            if args.model_ema:
-                utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-        
-        best_loss = checkpoint.get('lowest_loss', float('inf'))
-        cumulative_train_time = checkpoint.get('train_time', 0.0)
-        saved_epoch = checkpoint.get('epoch', 0)
-        if saved_epoch >0:
-            saved_epoch+=1
-        best_acc = checkpoint.get('best_acc', 0.0)
-        patience_counter = checkpoint.get('patience_counter', 0)
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                history = checkpoint.get('history', {})
+                if history:
+                    for i, drop in enumerate(model.drop_list):
+                        drop_history = history.get(f'drop{i}', {})
+                        drop.progression_keep = drop_history.get('progression_keep', [])
+                        drop.progression_scoring = drop_history.get('progression_scoring', [])
+                if args.model_ema:
+                    utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+            
+            best_loss = checkpoint.get('lowest_loss', float('inf'))
+            cumulative_train_time = checkpoint.get('train_time', 0.0)
+            saved_epoch = checkpoint.get('epoch', 0)
+            if saved_epoch >0:
+                saved_epoch+=1
+            best_acc = checkpoint.get('best_acc', 0.0)
+            patience_counter = checkpoint.get('patience_counter', 0)
+            patience_counter = checkpoint.get('patience_counter', 0)
+        except Exception as e:
+            best_loss = float('inf')
+            saved_epoch = 0
+            cumulative_train_time = 0.0
+            best_acc = 0.0
+            patience_counter = 0
 
 
 
@@ -384,7 +411,16 @@ def main(args):
         cumulative_train_time = 0.0
         best_acc = 0.0
         patience_counter = 0
+    
+    if args.update_scaling == 'increasing':
 
+        update_freq = 1
+    else:
+        update_freq = args.update_freq
+    
+    effective_epochs = args.epochs - args.annealing_factor
+    step_size = round(effective_epochs / args.update_scaling_steps)
+    denom = max(1, args.update_scaling_steps - 1)   
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -435,7 +471,10 @@ def main(args):
             check=check,
             update_freq=args.update_freq,
             update_batches=args.update_batches,
-            stats = stats
+            stats = stats,
+            scoring_type = args.scoring_type,
+            same_batch = args.same_batch,
+            help_par = 1
         )
 
         
@@ -459,8 +498,8 @@ def main(args):
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
         
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
+        # print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+        #       f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
         
         checkpoint ={
                 'model': model_without_ddp.state_dict(),
@@ -487,11 +526,17 @@ def main(args):
             best_loss = test_loss
             checkpoint['lowest_loss'] = best_loss
             patience_counter = 0  # reset early stopping counter
+            checkpoint['patience_counter'] = patience_counter
+
             if args.output_dir:  
                 utils.save_on_master(checkpoint, output_dir / 'best.pth')
         else:
             patience_counter += 1
-
+            checkpoint['patience_counter'] = patience_counter
+                 
+        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
+        
         if args.output_dir:
             utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')
         
@@ -516,10 +561,7 @@ def main(args):
         #         'patience_counter': patience_counter
         #     }, checkpoint_path)
 
-        if patience_counter >= args.early_stopping_patience:
-            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
-            break
-
+        
         log_stats = {
             'epoch': epoch,
             'train_loss': train_stats.get('loss', 0),
@@ -528,11 +570,16 @@ def main(args):
             'best_acc': best_acc,
             'test_loss': test_stats.get('loss', 0),
             'best_loss': best_loss,
+            'patience_counter': patience_counter,
         }
 
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+        if patience_counter >= args.early_stopping_patience:
+            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
+            break
+
 
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}%. Total training time: {total_time_str}")
