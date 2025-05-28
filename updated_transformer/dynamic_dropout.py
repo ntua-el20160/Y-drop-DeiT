@@ -92,9 +92,21 @@ class MyDropout(nn.Module):
         self.beta = new_beta
         self.initialized = True
         num_neurons = new_prev.numel()
-        self.random_neurons = np.random.choice(num_neurons, size=min(4, num_neurons), replace=False).tolist()
+        flat_idxs = np.random.choice(
+            num_neurons, size=min(4, num_neurons), replace=False
+        )
+        self.random_neurons = [
+            tuple(np.unravel_index(i, new_prev.shape))
+            for i in flat_idxs
+        ]
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
         self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
+
+
+
+        # self.random_neurons = np.random.choice(num_neurons, size=min(4, num_neurons), replace=False).tolist()
+        # self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
+        # self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
 
 
 
@@ -115,21 +127,22 @@ class MyDropout(nn.Module):
 
         # Normalize scoring
 
-        normalized = (scoring - scoring.mean()) / scoring.std()
+        #ormalized = (scoring - scoring.mean()) / scoring.std()
         # epsilon = 1e-6
         # s_min, s_max = scoring.min(), scoring.max()
         # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
-        
+        scoring_final = scoring
+        self.scoring.copy_(scoring_final)
         #Different mask types
         if self.mask_type == "sigmoid":
             # Original approach
-            scoring = -scoring
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            scoring_final = -scoring_final
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "sigmoid_inverse":
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             # Example smaller slope + random noise
             keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
@@ -137,15 +150,15 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
-            scoring = -scoring
+            scoring_final = -scoring_final
 
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
-            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+            s_min, s_max = scoring_final.min(), scoring_final.max()
+            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
         
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -154,12 +167,12 @@ class MyDropout(nn.Module):
         elif self.mask_type == "softmax_inverse":
             # Make sure scoring is not huge in magnitude.
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
-            normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
+            s_min, s_max = scoring_final.min(), scoring_final.max()
+            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
         
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -167,12 +180,12 @@ class MyDropout(nn.Module):
         elif self.mask_type == "softmax_absolute":
             # Make sure scoring is not huge in magnitude.
             epsilon = 1e-6
-            s_min, s_max = scoring.min(), scoring.max()
+            s_min, s_max = scoring_final.min(), scoring_final.max()
             normalized = torch.abs(2 *self.scaler* (scoring - s_min) / (s_max - s_min + epsilon) - self.scaler)
 
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring.shape)
+            probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
@@ -181,7 +194,7 @@ class MyDropout(nn.Module):
 
         else:
             # Fallback or default
-            normalized = (scoring - scoring.mean()) / scoring.std()
+            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
             keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
 
@@ -196,7 +209,6 @@ class MyDropout(nn.Module):
         # Momentum-like update
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
         self.previous.copy_(keep_prob)
-        self.scoring.copy_(scoring)
 
 
 
@@ -260,29 +272,32 @@ class MyDropout(nn.Module):
 
         hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
         self.scoring_hist += hist_scoring
-        for i, neuron in enumerate(self.random_neurons):
-            hist_scoring_neuron, _ = np.histogram(np.array([scoring_det[neuron].item()]), bins=bins_scoring)
+        for i, idx_tuple in enumerate(self.random_neurons):
+            # idx_tuple is e.g. (c,h,w) or (d,)
+            val = scoring_det[idx_tuple].item()
+            hist_scoring_neuron, _ = np.histogram([val], bins=bins_scoring)
             self.random_neuron_hists_scoring[i] += hist_scoring_neuron
         
         bins_keep = np.linspace(0.0, 0.8, 101)
 
         hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
-        for i, neuron in enumerate(self.random_neurons):
-            
-            hist_keep_neuron, _ = np.histogram(np.array([keep_prob_det[neuron].item()]), bins=bins_keep)
+        for i, idx_tuple in enumerate(self.random_neurons):
+            val = keep_prob_det[idx_tuple].item()
+            hist_keep_neuron, _ = np.histogram([val], bins=bins_keep)
             self.random_neuron_hists_keep[i] += hist_keep_neuron
-            # print("Neuron",neuron,"Keep rate: ",keep_prob_det[neuron].item())
-            # print(f"Histogram o neuron {neuron} so far ", self.random_neuron_hists_keep[i])
         self.keep_hist += hist_keep
         
         # Increment the update counter.
         self.n_updates += 1
         
-       
-    def update_progression(self):
+              
+    def update_progression(self,save_dir,label=''):
         if self.sum_scoring is not None and self.running_dropout_mean is not None:
             self.progression_keep.append(self.running_dropout_mean.mean().item())
             self.progression_scoring.append(self.sum_scoring)
+            np.save(os.path.join(save_dir, f"{label}_progression_keep.npy"), self.progression_keep)
+            np.save(os.path.join(save_dir, f"{label}_progression_scoring.npy"), self.progression_scoring)
+
     def clear_progression(self):
         """Clear the progression statistics."""
         self.n_updates = 0  # Number of updates processed.
@@ -297,7 +312,38 @@ class MyDropout(nn.Module):
         
         # For progression statistics (one scalar per update).
         self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
-        self.sum_keep = None    
+        self.sum_keep = None 
+    def save_statistics(self, epoch_dir,layer_label =''):
+        """
+        Save all numerical statistics for a given epoch to disk in a subfolder.
+        Returns the path to the epoch folder.
+        """
+        # Create epoch-specific folder
+        # epoch_dir = os.path.join(base_dir, f"epoch_{epoch_label}")
+        # os.makedirs(epoch_dir, exist_ok=True)
+
+        # 1) Histograms
+        np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist.npy"), self.scoring_hist)
+        np.save(os.path.join(epoch_dir, f"{layer_label}_keep_hist.npy"), self.keep_hist)
+
+        # 2) Running means (convert to numpy)
+        np.save(
+            os.path.join(epoch_dir, f"{layer_label}_running_scoring_mean.npy"),
+            self.running_scoring_mean.cpu().numpy()
+        )
+        np.save(
+            os.path.join(epoch_dir, f"{layer_label}_running_dropout_mean.npy"),
+            self.running_dropout_mean.cpu().numpy()
+        )
+        for i, neuron in enumerate(self.random_neurons):
+            np.save(
+                os.path.join(epoch_dir, f"{layer_label}_random_neuron_{neuron}_scoring_hist.npy"),
+                self.random_neuron_hists_scoring[i]
+            )
+            np.save(
+                os.path.join(epoch_dir, f"{layer_label}_random_neuron_{neuron}_keep_hist.npy"),
+                self.random_neuron_hists_keep[i]
+            )
     def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         """
         Plot the aggregated statistics:
@@ -354,7 +400,7 @@ class MyDropout(nn.Module):
             fig.savefig(os.path.join(save_dir, f"{epoch_label}_aggregated_stats.png"))
         plt.close(fig)
 
-    def plot_current_stats(self, epoch_label, save_dir=None):
+    def plot_current_stats(self, epoch,batch_idx, save_dir=None,layer_label= 0):
         """
         Plot the aggregated statistics:
          • Two histograms:
@@ -364,6 +410,9 @@ class MyDropout(nn.Module):
               - Running per-neuron average scoring.
               - Running per-neuron average keep probability.
         """
+        epoch_label =f'Epoch {epoch} layer {layer_label} sample { batch_idx//350}'
+        epoch_label2 =f'Epoch_{epoch}_layer_{layer_label}_sample_{ batch_idx//350}'
+
         scoring_det = self.scoring.detach().cpu().float()
         keep_prob_det = 1-self.previous.detach().cpu().float()
         score_mean = scoring_det.mean().item()
@@ -425,7 +474,7 @@ class MyDropout(nn.Module):
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"{epoch_label}_current_stats.png"))
+            fig.savefig(os.path.join(save_dir, f"{epoch_label2}_current_stats.png"))
         plt.close(fig)
 
     def plot_random_node_histograms_scoring(self, epoch_label, save_dir=None):
@@ -456,6 +505,7 @@ class MyDropout(nn.Module):
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
+
             fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_dropout_histograms.png"))
         plt.close(fig)
 
@@ -518,26 +568,6 @@ class MyDropout(nn.Module):
             if full_key in missing_keys:
                 missing_keys.remove(full_key)
 
-    def update_hyperparameters(self,elasticity = None,p=None,tied_layer: Optional[nn.Module] = None,scaler =None,mask_type = None):
-        """
-        Update the hyperparameters of the custom dropout layer.
-        elasticity: how quickly the dropout mask changes.
-        p: dropout probability.
-        tied_layer: the module whose output is tied to this dropout.
-        scaler: scaling factor used in computing keep probability.
-        mask_type: determines which method to use for computing the keep probability.
-        """
-        if elasticity is not None:
-            self.elasticity = elasticity
-        if p is not None:
-            self.base_keep = 1 - p
-            self.p = p
-        if tied_layer is not None:
-            self.tied_layer = tied_layer
-        if mask_type is not None:
-            self.mask_type = mask_type
-        if scaler is not None:
-            self.scaler = scaler
 
     def reset_dropout_masks(self):
         """Reset the dropout masks to their default values."""

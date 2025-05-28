@@ -11,6 +11,7 @@ import math
 import os
 import sys
 from typing import Iterable, Optional
+import torch.nn.functional as F
 
 import torch
 import numpy as np
@@ -47,7 +48,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,output_dir: str = None,) -> dict:
+                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
+                    output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -59,7 +61,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
+    #new_iter = iter(data_loader)
+
+    # if check and (not same_batch) and (update_data_loader == None):
+        # Create a new iterator for the data loader.
     new_iter = iter(data_loader)
+    
+
+    # print('check:', check)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -70,7 +79,21 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
-                    next_batches = list(itertools.islice(new_iter, update_batches))
+                    helper = data_loader.batch_size//32
+                    next_batches = []
+                    if same_batch:
+                        big_batches = [(samples.clone(), targets.clone())]
+                    else:
+                        big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
+                    for i in range(update_batches):
+                        b = i//helper
+                        ig = i%helper
+                        full_samples, full_targets = big_batches[b]
+                        sub_samples = full_samples[32*ig:32*(ig+1)]
+                        sub_targets = full_targets[32*ig:32*(ig+1)]
+                        next_batches.append((sub_samples.clone(), sub_targets.clone()))
+                    
+                    #next_batches = list(itertools.islice(new_iter, update_batches))
                 else:
                     next_batches = []
                     for _ in range(update_batches):
@@ -81,13 +104,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
-                model.calculate_scores(next_batches,device,stats=stats)
+                #model.calculate_scores(next_batches,device,stats=stats)
+                model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type)
+
 
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
             if stats and batch_idx % 350 == 0:
-                model.plot_current_stats(f'Epoch {epoch+1} sample { batch_idx//350} ', output_dir / 'plots')
+                model.plot_current_stats(epoch+1,batch_idx, output_dir / f'plots/epoch_{epoch+1}')
 
                 
             
@@ -102,13 +127,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         is_second_order = False 
-        # loss_scaler(loss, optimizer, clip_grad=max_norm,
-        #            parameters=model.parameters(), create_graph=is_second_order)
-       
-        # optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        torch.cuda.synchronize()
+        if help_par == 1:
+            loss_scaler(
+            loss,
+            optimizer,
+            clip_grad=max_norm,
+            parameters=model.parameters(),
+            create_graph=is_second_order
+        )
+        else:
+            loss.backward()
+            optimizer.step()
+            torch.cuda.synchronize()
 
         if model_ema is not None:
             model_ema.update(model)
@@ -132,8 +162,9 @@ def evaluate(data_loader, model, device):
 
     # switch to evaluation mode
     model.eval()
+    print_freq = 30
 
-    for images, target in metric_logger.log_every(data_loader, 10, header):
+    for images, target in metric_logger.log_every(data_loader, print_freq, header):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 

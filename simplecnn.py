@@ -6,6 +6,9 @@ import time
 from pathlib import Path
 import utils
 import numpy as np
+#CHANGE TO CHECK: import random
+import random
+
 
 import torch
 import torch.nn as nn
@@ -22,7 +25,7 @@ import copy
 from typing import Iterable
 from captum.attr import LayerConductance
 from evaluate_gradients.MultiLayerConductance import MultiLayerConductance
-
+from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 
 class CNN6_S1(nn.Module):
     def __init__(self, num_classes=10, use_custom_dropout=True, elasticity=1.0, p=0.1, n_steps=5,mask_type = 'sigmoid',scaler = 1.0):
@@ -59,7 +62,6 @@ class CNN6_S1(nn.Module):
             self.drop_list = nn.ModuleList([nn.Dropout(p) for _ in self.selected_layers])
         self.scores ={}
         
-        
     def forward(self, x):
         # Convolutional layers
         x = self.conv1(x)
@@ -86,7 +88,7 @@ class CNN6_S1(nn.Module):
         x = self.fc3(x)
         return x
 
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True) -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -105,14 +107,25 @@ class CNN6_S1(nn.Module):
             # Get model predictions
             outputs = model_clone(x_captum)
             pred = outputs.argmax(dim=1)
-
             #calculate conductunce for batch
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            # mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+            # captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            if scoring_type == "Conductance":
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            elif scoring_type == "Sensitivity":
+                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+
+            else:
+                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
-                score_mean = score.mean(dim=0)
+                #score_mean = score.mean(dim=0)
+                score_mean = score if scoring_type == "Sensitivity" else score.mean(dim=0)
+
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
                     model_clone.scores[f'drop_{i}'] = score_mean.clone()
@@ -123,10 +136,11 @@ class CNN6_S1(nn.Module):
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
-                model_clone.scores[f'drop_{i}'],
+                #CHANGE TO CHECK: diving by the number of batches to get the average score
+                model_clone.scores[f'drop_{i}']/len(batches),
+                #model_clone.scores[f'drop_{i}'],
                 stats=stats
             )
-
 
         #load the update on the model from the copy
         for i,_ in enumerate(model_clone.drop_list):
@@ -160,13 +174,13 @@ class CNN6_S1(nn.Module):
         for i,_ in enumerate(self.drop_list):
             self.drop_list[i].plot_aggregated_statistics(epoch_label+f"layer {i}", save_dir)
     
-    def plot_current_stats(self, epoch_label, save_dir=None):
+    def plot_current_stats(self, epoch,batch_idx, save_dir):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].plot_current_stats(epoch_label+f"layer {i}", save_dir)
+            self.drop_list[i].plot_current_stats(epoch,batch_idx, save_dir, i)
 
-    def update_progression(self):
+    def update_progression(self,save_dir):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].update_progression()
+            self.drop_list[i].update_progression(save_dir, label = f"layer{i}")
  
     def plot_progression_statistics(self, save_dir=None,label =''):
         for i,_ in enumerate(self.drop_list):
@@ -178,11 +192,12 @@ class CNN6_S1(nn.Module):
         for i,_ in enumerate(self.drop_list):
             self.drop_list[i].plot_random_node_histograms_keep(epoch_label+f"layer {i}", save_dir)
 
-
+    def save_statistics(self, save_dir):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].save_statistics(save_dir, layer_label = f"layer{i}")
     def clear_progression(self):
         for drop in self.drop_list:
             drop.clear_progression()
-
 
 def get_args_parser():
     parser = argparse.ArgumentParser('SimpleCNNMLP Training Script', add_help=False)
@@ -224,17 +239,41 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
+                        type=str, help='Scoring type for custom dropout')
+    parser.add_argument('--same_batch', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
     return parser
 
 def main(args):
     # Set the random seed for reproducibility.
-    torch.manual_seed(args.seed)
+    # torch.manual_seed(args.seed)
     
-    device = torch.device(args.device)
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
+    # device = torch.device(args.device)
+    # seed = args.seed + utils.get_rank()
+    # torch.manual_seed(seed)
+    # np.random.seed(seed)
+    #CHANGE TO CHECK: how to set the random seed for random module
+    seed = args.seed
+
+    # # 1. Python built-in RNG
+    random.seed(seed)
+    # 2. NumPy RNG
     np.random.seed(seed)
+    # 3. Torch CPU RNG
+    torch.manual_seed(seed)
+    # 4. Torch CUDA RNGs (if you have GPUs)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    # 5. Enforce deterministic behavior in cuDNN
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    device = torch.device(args.device)
+
+    ############################################################
+
     # Data augmentation and normalization for CIFAR10.
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -249,16 +288,38 @@ def main(args):
                              (0.2023, 0.1994, 0.2010)),
     ])
     
-    train_dataset = torchvision.datasets.CIFAR10(root=args.data_path, train=True, download=True,
-                                                 transform=transform_train)
-    test_dataset  = torchvision.datasets.CIFAR10(root=args.data_path, train=False, download=True,
-                                                 transform=transform_test)
+    # train_dataset = torchvision.datasets.CIFAR10(root=args.data_path, train=True, download=True,
+    #                                              transform=transform_train)
+    # test_dataset  = torchvision.datasets.CIFAR10(root=args.data_path, train=False, download=True,
+    #                                              transform=transform_test)
     
+    # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
+    #                                            shuffle=True, num_workers=4, pin_memory=True,drop_last=True)
+    # test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
+    #                                            shuffle=False, num_workers=4, pin_memory=True)
+    if args.data_set == 'CIFAR100':
+        DatasetClass = torchvision.datasets.CIFAR100
+        num_classes = 100
+    else:
+        DatasetClass = torchvision.datasets.CIFAR10
+        num_classes = 10
+
+    train_dataset = DatasetClass(
+        root=args.data_path, train=True, download=True,
+        transform=transform_train
+    )
+    test_dataset = DatasetClass(
+        root=args.data_path, train=False, download=True,
+        transform=transform_test
+    )
+
+        
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size,
                                                shuffle=True, num_workers=4, pin_memory=True,drop_last=True)
     test_loader  = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
                                                shuffle=False, num_workers=4, pin_memory=True)
     
+
 
     #print(sub_dataset.shape())
     def preload_subdataset(subdataset):
@@ -279,7 +340,7 @@ def main(args):
         cached_subdataset = None
 
   
-    model = CNN6_S1(num_classes=10, use_custom_dropout=args.ydrop,
+    model = CNN6_S1(num_classes=num_classes, use_custom_dropout=args.ydrop,
                 elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
     model = model.to(device)
 
@@ -294,25 +355,38 @@ def main(args):
     # model(dummy_input)
     
     if args.resume:
-        print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint.get('epoch', 0) + 1
-        print(f"Resumed at epoch {start_epoch}")
-        cumulative_train_time = checkpoint['train_time']
-        best_acc = checkpoint['best_acc']
-        history = checkpoint.get('history', {})
-        if history:
-            for i, drop in enumerate(model.drop_list):
-                drop_history = history.get(f'drop{i}', {})
-                drop.progression_keep = drop_history.get('progression_keep', [])
-                drop.progression_scoring = drop_history.get('progression_scoring', [])
+        try:
+            print(f"Resuming from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device,weights_only=False)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            print(f"Resumed at epoch {start_epoch}")
+            cumulative_train_time = checkpoint['train_time']
+            best_acc = checkpoint['best_acc']
+            history = checkpoint.get('history', {})
+            best_loss = checkpoint.get('lowest_loss', float('inf'))
 
+            if history:
+                for i, drop in enumerate(model.drop_list):
+                    drop_history = history.get(f'drop{i}', {})
+                    drop.progression_keep = drop_history.get('progression_keep', [])
+                    drop.progression_scoring = drop_history.get('progression_scoring', [])
+        except Exception as e:
+            print(f"Warning: could not resume from '{args.resume}' ({e}). Starting from scratch.")
+            start_epoch = 0
+            cumulative_train_time = 0.0
+            best_acc = 0.0
+            history = {}
+            best_loss = float('inf')
     else:
         start_epoch = 0
         cumulative_train_time = 0.0
         best_acc = 0.0
+        history = {}
+        best_loss = float('inf')
+
+
         
     if args.update_scaling == 'increasing':
 
@@ -340,6 +414,8 @@ def main(args):
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
+                epoch_dir = os.path.join(output_dir, f"plots/epoch_{epoch+1}_data")
+                os.makedirs(epoch_dir, exist_ok=True)
 
             if args.update_scaling!='no':
                 i = (epoch - args.annealing_factor) // step_size
@@ -351,7 +427,7 @@ def main(args):
                     step_index = args.update_scaling_steps - 1 - i
                 update_freq = round(1 + (args.update_freq - 1) * step_index / denom)
                 print(f"[Epoch {epoch}] Update frequency set to {update_freq}")
-
+        
             
 
         # Train for one epoch.
@@ -372,23 +448,29 @@ def main(args):
             stats = stats,
             update_data_loader = cached_subdataset,
             output_dir = output_dir,
+            scoring_type = args.scoring_type,
+            same_batch = args.same_batch,
+            help_par = 0
         )
 
         epoch_time = time.time() - start_time
         cumulative_train_time += epoch_time
-        
+
         
         # Evaluate on the test set.
         test_stats = evaluate(test_loader, model, device)
+        test_acc = test_stats.get('acc1', 0.0)
+        test_loss = test_stats.get('loss', 0.0)
         
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
+        # print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+        #       f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
         
         if check and stats:
-            model.update_progression()
+            model.update_progression(output_dir / 'plots')
+           # model.save_statistics(epoch_dir)
             model.plot_progression_statistics(output_dir / 'plots',label = "")
-            model.plot_aggregated_statistics(f'Epoch {epoch+1} ', output_dir / 'plots')
-            model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', output_dir / 'plots')
+            model.plot_aggregated_statistics(f'Epoch {epoch+1} ', epoch_dir)
+            model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', epoch_dir)
             model.plot_random_node_histograms_keep(f'Epoch {epoch+1} ', output_dir / 'plots')
             model.clear_progression()
 
@@ -396,11 +478,15 @@ def main(args):
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'epoch': epoch,
-                'test_acc': best_acc,
+                'test_acc': test_acc,
+
+                # 'test_acc': best_acc,
                 'train_stats': train_stats,
                 'test_stats': test_stats,
                 'train_time': cumulative_train_time,
-                'best_acc': best_acc,  
+                'best_acc': best_acc,
+                'test_loss': test_loss,
+                'lowest_loss': best_loss,   
             }
         if args.ydrop:
             checkpoint['history'] = {}
@@ -409,15 +495,22 @@ def main(args):
                         'progression_keep': drop.progression_keep,
                         'progression_scoring': drop.progression_scoring,
                     }    
-
+        if test_loss < best_loss:
+            best_loss = test_loss
+            checkpoint['lowest_loss'] = best_loss
+            
         # Save checkpoint if a new best accuracy is reached.
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
+
             checkpoint['best_acc'] = best_acc
             torch.save(checkpoint, output_dir /"best_model.pth")
+     
+        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
+        
         torch.save(checkpoint, output_dir / "checkpoint.pth")
 
-        
         # Log epoch statistics.
         log_stats = {
             'epoch': epoch,
@@ -425,6 +518,8 @@ def main(args):
             'test_acc': test_stats.get('acc1', 0),
             'time': cumulative_train_time,
             'best_acc': best_acc,
+            'test_loss': test_stats.get('loss', 0),
+            'best_loss': best_loss,
         }
 
         with (output_dir/ "log.txt").open("a") as f:
