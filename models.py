@@ -70,16 +70,23 @@ class MyVisionTransformer(VisionTransformer):
             block_num = i//4
             layer_num = i%4
             self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" Block_{block_num}_layer_{layer_num}")
-    
-    def clear_progression(self):
-        for drop in self.drop_list:
-            drop.clear_progression()
-    
-    def plot_current_stats(self, epoch_label, save_dir=None):
+    def save_statistics(self, save_dir):
         for i,_ in enumerate(self.drop_list):
             block_num = i//4
             layer_num = i%4
-            self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
+            self.drop_list[i].save_statistics(save_dir, layer_label = f"block{block_num}_layer{layer_num}")
+    def clear_progression(self):
+        for drop in self.drop_list:
+            drop.clear_progression()
+    def plot_current_stats(self, epoch,batch_idx, save_dir):
+        for i,_ in enumerate(self.drop_list):
+            self.drop_list[i].plot_current_stats(epoch,batch_idx, save_dir, i,True)
+
+    # def plot_current_stats(self, epoch_label, save_dir=None):
+    #     for i,_ in enumerate(self.drop_list):
+    #         block_num = i//4
+    #         layer_num = i%4
+    #         self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
    
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.

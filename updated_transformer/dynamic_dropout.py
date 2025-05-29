@@ -336,14 +336,17 @@ class MyDropout(nn.Module):
             self.running_dropout_mean.cpu().numpy()
         )
         for i, neuron in enumerate(self.random_neurons):
-            np.save(
-                os.path.join(epoch_dir, f"{layer_label}_random_neuron_{neuron}_scoring_hist.npy"),
-                self.random_neuron_hists_scoring[i]
-            )
-            np.save(
-                os.path.join(epoch_dir, f"{layer_label}_random_neuron_{neuron}_keep_hist.npy"),
-                self.random_neuron_hists_keep[i]
-            )
+            neuron_str = "_".join(str(x) for x in neuron)
+
+            # Build the filenames
+            scoring_fname = f"{layer_label}_random_neuron_{neuron_str}_scoring_hist.npy"
+            keep_fname    = f"{layer_label}_random_neuron_{neuron_str}_keep_hist.npy"
+
+            # Save out the arrays
+            np.save(os.path.join(epoch_dir, scoring_fname),
+                    self.random_neuron_hists_scoring[i])
+            np.save(os.path.join(epoch_dir, keep_fname),
+                    self.random_neuron_hists_keep[i])
     def plot_aggregated_statistics(self, epoch_label, save_dir=None):
         """
         Plot the aggregated statistics:
@@ -400,7 +403,7 @@ class MyDropout(nn.Module):
             fig.savefig(os.path.join(save_dir, f"{epoch_label}_aggregated_stats.png"))
         plt.close(fig)
 
-    def plot_current_stats(self, epoch,batch_idx, save_dir=None,layer_label= 0):
+    def plot_current_stats(self, epoch,batch_idx, save_dir=None,layer_label= 0, block = False):
         """
         Plot the aggregated statistics:
          • Two histograms:
@@ -410,8 +413,14 @@ class MyDropout(nn.Module):
               - Running per-neuron average scoring.
               - Running per-neuron average keep probability.
         """
-        epoch_label =f'Epoch {epoch} layer {layer_label} sample { batch_idx//350}'
-        epoch_label2 =f'Epoch_{epoch}_layer_{layer_label}_sample_{ batch_idx//350}'
+        if block:
+              block_num = layer_label//4
+              layer_num = layer_label%4
+              epoch_label =f'Epoch {epoch} block {block_num} layer {layer_num} sample { batch_idx//350}'
+              epoch_label2 =f'Epoch_{epoch}_block{block_num}_layer_{layer_num}_sample_{ batch_idx//350}'
+        else:
+            epoch_label =f'Epoch {epoch} layer {layer_label} sample { batch_idx//350}'
+            epoch_label2 =f'Epoch_{epoch}_layer_{layer_label}_sample_{ batch_idx//350}'
 
         scoring_det = self.scoring.detach().cpu().float()
         keep_prob_det = 1-self.previous.detach().cpu().float()

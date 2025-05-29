@@ -19,6 +19,7 @@ import torchvision.transforms as transforms
 from datasets import build_dataset, create_subdataset
 # Import your custom dropout module.
 from updated_transformer.dynamic_dropout import MyDropout
+from updated_transformer.plots import plot_epoch_statistics
 from engine import train_one_epoch, evaluate
 from timm.utils import NativeScaler
 import copy
@@ -176,7 +177,7 @@ class CNN6_S1(nn.Module):
     
     def plot_current_stats(self, epoch,batch_idx, save_dir):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].plot_current_stats(epoch,batch_idx, save_dir, i)
+            self.drop_list[i].plot_current_stats(epoch,batch_idx, save_dir, i,False)
 
     def update_progression(self,save_dir):
         for i,_ in enumerate(self.drop_list):
@@ -198,6 +199,7 @@ class CNN6_S1(nn.Module):
     def clear_progression(self):
         for drop in self.drop_list:
             drop.clear_progression()
+    
 
 def get_args_parser():
     parser = argparse.ArgumentParser('SimpleCNNMLP Training Script', add_help=False)
@@ -414,7 +416,7 @@ def main(args):
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
-                epoch_dir = os.path.join(output_dir, f"plots/epoch_{epoch+1}_data")
+                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
                 os.makedirs(epoch_dir, exist_ok=True)
 
             if args.update_scaling!='no':
@@ -467,11 +469,13 @@ def main(args):
         
         if check and stats:
             model.update_progression(output_dir / 'plots')
-           # model.save_statistics(epoch_dir)
-            model.plot_progression_statistics(output_dir / 'plots',label = "")
-            model.plot_aggregated_statistics(f'Epoch {epoch+1} ', epoch_dir)
-            model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', epoch_dir)
-            model.plot_random_node_histograms_keep(f'Epoch {epoch+1} ', output_dir / 'plots')
+            model.save_statistics(epoch_dir)
+            plot_epoch_statistics(output_dir, epoch+1, epoch_dir)
+            #model.plot_progression_statistics(output_dir / 'plots',label = "")
+            #model.plot_aggregated_statistics(f'Epoch {epoch+1} ', epoch_dir)
+            #model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', epoch_dir)
+            #model.plot_random_node_histograms_keep(f'Epoch {epoch+1} ', output_dir / 'plots')
+            
             model.clear_progression()
 
         checkpoint = {

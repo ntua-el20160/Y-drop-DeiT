@@ -13,13 +13,14 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import glob
 
 
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
 from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
-def plot_epoch_statistics(base_path, epoch, save_dir=None):
+def plot_epoch_statistics(base_path, epoch, save_dir=None,block =False):
     """
     Load and plot all layer stats for a given epoch.
     
@@ -34,7 +35,7 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None):
         overwrite back into the epoch folder.
     """
     # locate the folder
-    epoch_dir = os.path.join(base_path, f"plots/epoch_{epoch}_data")
+    epoch_dir = os.path.join(base_path, "plots", f"epoch_{epoch}_data")
     if not os.path.isdir(epoch_dir):
         raise FileNotFoundError(f"No such directory: {epoch_dir}")
     if save_dir is None:
@@ -42,7 +43,12 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None):
 
     layer_idx = 0
     while True:
-        layer_label = f"layer{layer_idx}"
+        if block:
+            block_num = layer_idx//4
+            layer_num = layer_idx%4
+            layer_label = f"block{block_num}_layer{layer_num}"
+        else:
+            layer_label = f"layer{layer_idx}"
         # check for the key histogram to decide when to stop
         scoring_path = os.path.join(epoch_dir, f"{layer_label}_scoring_hist.npy")
         if not os.path.exists(scoring_path):
@@ -66,18 +72,21 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None):
         random_hists_keep    = []
         for sf in scoring_files:
             # extract neuron index from filename
-            basename = os.path.basename(sf)
-            # e.g. layer0_random_neuron_42_scoring_hist.npy
-            parts = basename.split('_')
-            neuron = int(parts[3])
-            random_neurons.append(neuron)
+            fname  = os.path.basename(sf)
+            prefix = f"{layer_label}_random_neuron_"
+            suffix = "_scoring_hist.npy"
+            core = fname[len(prefix):-len(suffix)]
+            
+            # turn “3_5_7” → (3,5,7), or “31” → (31,)
+            coords = tuple(int(x) for x in core.split("_"))
+            random_neurons.append(coords)
             random_hists_scoring.append(np.load(sf))
+            
+            # similarly for keep:
+            keep_path = os.path.join(epoch_dir,
+                                    f"{layer_label}_random_neuron_{core}_keep_hist.npy")
+            random_hists_keep.append(np.load(keep_path))
 
-            keep_file = os.path.join(
-                epoch_dir,
-                f"{layer_label}_random_neuron_{neuron}_keep_hist.npy"
-            )
-            random_hists_keep.append(np.load(keep_file))
 
         # call your plotting fns
         epoch_label = f"Epoch {epoch} {layer_label}"

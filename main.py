@@ -13,6 +13,7 @@ import torch.backends.cudnn as cudnn
 import json
 import random
 from pathlib import Path
+from updated_transformer.plots import plot_epoch_statistics
 
 from timm.data import Mixup
 from timm.models import create_model
@@ -432,7 +433,7 @@ def main(args):
         model.use_normal_dropout()
 
     check = False
-
+    import os
     for epoch in range(saved_epoch, args.epochs):
         epoch_start_time = time.time()
         stats = False
@@ -443,6 +444,9 @@ def main(args):
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
+                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
+                os.makedirs(epoch_dir, exist_ok=True)
+
             if args.update_scaling!='no':
                 i = (epoch - args.annealing_factor) // step_size
                 i = min(i, args.update_scaling_steps - 1)
@@ -490,10 +494,9 @@ def main(args):
         test_loss = test_stats.get('loss', 0.0)
         
         if check and stats:
-            model.update_progression()
-            model.plot_progression_statistics(output_dir / 'plots',label = "")
-            model.plot_aggregated_statistics(f'Epoch {epoch+1}', output_dir / 'plots')
-            model.clear_progression()
+            model.update_progression(output_dir / 'plots')
+            model.save_statistics(epoch_dir)
+            plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
         
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
