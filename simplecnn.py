@@ -158,6 +158,7 @@ class CNN6_S1(nn.Module):
             self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
             self.drop_list[i].random_neuron_hists_scoring = model_clone.drop_list[i].random_neuron_hists_scoring
             self.drop_list[i].random_neuron_hists_keep = model_clone.drop_list[i].random_neuron_hists_keep
+            self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
 
         del model_clone
         torch.cuda.empty_cache()

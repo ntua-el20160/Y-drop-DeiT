@@ -66,6 +66,7 @@ class MyDropout(nn.Module):
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
         self.keep_hist = np.zeros(100)
+        self.scoring_hist_focused = np.zeros(300)  # Focused histogram for scoring.
         self.random_neurons = []  # Randomly selected neurons for histogram tracking.
 
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
@@ -101,6 +102,7 @@ class MyDropout(nn.Module):
         ]
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
         self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
+        
 
 
 
@@ -277,6 +279,12 @@ class MyDropout(nn.Module):
             val = scoring_det[idx_tuple].item()
             hist_scoring_neuron, _ = np.histogram([val], bins=bins_scoring)
             self.random_neuron_hists_scoring[i] += hist_scoring_neuron
+        #print("Scoring hist focused before:",self.scoring_hist_focused)
+
+        bins_scoring_focused = np.linspace(-0.05, 0.2, 301)  # Focused histogram for scoring.
+        hist_scoring_focused, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring_focused)
+        self.scoring_hist_focused += hist_scoring_focused
+        #print("Scoring hist focused after:",self.scoring_hist_focused)
         
         bins_keep = np.linspace(0.0, 0.8, 101)
 
@@ -306,6 +314,7 @@ class MyDropout(nn.Module):
         
         # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
         self.scoring_hist = np.zeros(100)  
+        self.scoring_hist_focused = np.zeros(300)  # Focused histogram for scoring.
         self.keep_hist = np.zeros(100)
         self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
         self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
@@ -325,6 +334,7 @@ class MyDropout(nn.Module):
         # 1) Histograms
         np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist.npy"), self.scoring_hist)
         np.save(os.path.join(epoch_dir, f"{layer_label}_keep_hist.npy"), self.keep_hist)
+        np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist_focused.npy"), self.scoring_hist_focused)
 
         # 2) Running means (convert to numpy)
         np.save(

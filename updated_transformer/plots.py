@@ -53,14 +53,20 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None,block =False):
         scoring_path = os.path.join(epoch_dir, f"{layer_label}_scoring_hist.npy")
         if not os.path.exists(scoring_path):
             break
+        
+        
 
         # load aggregated stats
         keep_path = os.path.join(epoch_dir, f"{layer_label}_keep_hist.npy")
+        focused_scoring_path = os.path.join(epoch_dir, f"{layer_label}_scoring_hist_focused.npy")
+
         run_score_path = os.path.join(epoch_dir, f"{layer_label}_running_scoring_mean.npy")
         run_keep_path  = os.path.join(epoch_dir, f"{layer_label}_running_dropout_mean.npy")
 
+
         scoring_hist          = np.load(scoring_path)
         keep_hist             = np.load(keep_path)
+        focused_scoring_hist = np.load(focused_scoring_path)
         running_scoring_mean  = torch.from_numpy(np.load(run_score_path))
         running_dropout_mean  = torch.from_numpy(np.load(run_keep_path))
 
@@ -90,6 +96,7 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None,block =False):
 
         # call your plotting fns
         epoch_label = f"Epoch {epoch} {layer_label}"
+        
         plot_aggregated_statistics(
             epoch_label,
             scoring_hist,
@@ -97,6 +104,11 @@ def plot_epoch_statistics(base_path, epoch, save_dir=None,block =False):
             running_scoring_mean,
             running_dropout_mean,
             save_dir=save_dir
+        )
+        plot_focused_histogram(
+            focused_scoring_hist,
+            epoch_label,
+            save_path=save_dir
         )
         if random_neurons:
             plot_random_node_histograms_scoring(
@@ -199,7 +211,35 @@ def plot_random_node_histograms_keep(random_neurons,random_neuron_hists_keep, ep
         os.makedirs(save_dir, exist_ok=True)
         fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_dropout_histograms.png"))
     plt.close(fig)
+def plot_focused_histogram(focused_hist, epoch_label, save_path=None):
+    """
+    Plot a focused histogram with 50 bins in the range [-0.7, 0.7].
+    
+    Parameters
+    ----------
+    focused_hist : np.ndarray
+        The histogram data to plot.
+    title : str
+        The title for the plot.
+    save_path : str or None
+        If provided, the plot will be saved to this path; otherwise it will be shown.
+    """
+    bins = np.linspace(-0.05, 0.2, 301)  # 50 bins => 51 edges.
+    bin_centers = (bins[:-1] + bins[1:]) / 2
 
+    plt.figure(figsize=(10, 6))
+    plt.bar(bin_centers, focused_hist, width=(bins[1] - bins[0]), color='blue', alpha=0.7)
+    plt.title(f"{epoch_label} - Focused Scoring Histogram")
+    plt.xlabel("Scoring")
+    plt.ylabel("Count")
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(os.path.join(save_path, f"{epoch_label}_focused_scoring_histograms.png"))
+
+        plt.close()
+    else:
+        plt.show()
 def to_2d(arr):
     """
     Convert an input numpy array into a 2D array for plotting.
