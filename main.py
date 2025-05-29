@@ -478,7 +478,8 @@ def main(args):
             stats = stats,
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
-            help_par = 1
+            help_par = 1,
+            output_dir=output_dir,
         )
 
         

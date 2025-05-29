@@ -61,9 +61,11 @@ class MyVisionTransformer(VisionTransformer):
             layer_num = i%4 
             self.drop_list[i].plot_aggregated_statistics(epoch_label+f" Block {block_num} layer{layer_num}", save_dir)
 
-    def update_progression(self):
+    def update_progression(self,save_dir):
         for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].update_progression()
+            block_num = i//4
+            layer_num = i%4
+            self.drop_list[i].update_progression(save_dir,f"block{block_num}_layer{layer_num}")
  
     def plot_progression_statistics(self, save_dir=None,label =''):
         for i,_ in enumerate(self.drop_list):

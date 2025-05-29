@@ -417,7 +417,9 @@ def main(args):
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
                 epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
+                epoch_dir_image = os.path.join(epoch_dir,"images")
                 os.makedirs(epoch_dir, exist_ok=True)
+                os.makedirs(epoch_dir_image, exist_ok=True)
 
             if args.update_scaling!='no':
                 i = (epoch - args.annealing_factor) // step_size
@@ -470,7 +472,8 @@ def main(args):
         if check and stats:
             model.update_progression(output_dir / 'plots')
             model.save_statistics(epoch_dir)
-            plot_epoch_statistics(output_dir, epoch+1, epoch_dir)
+
+            plot_epoch_statistics(output_dir, epoch+1, epoch_dir_image)
             #model.plot_progression_statistics(output_dir / 'plots',label = "")
             #model.plot_aggregated_statistics(f'Epoch {epoch+1} ', epoch_dir)
             #model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', epoch_dir)
