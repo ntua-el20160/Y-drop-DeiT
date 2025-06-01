@@ -327,9 +327,9 @@ def main(args):
     # for i, block in enumerate(model.blocks):
     #     print(f"[MyVisionTransformer] Block {i} attn_drop.p = {block.attn.attn_drop.p}")
     #     print(f"[MyVisionTransformer] Block {i} proj_drop.p = {block.attn.proj_drop.p}")
-    for drop in model.drop_list:
-        print(f"Dropout rate: {drop.p}, mask type: {drop.mask_type}, "
-              f"elasticity: {drop.elasticity}, scaler: {drop.scaler}")
+    # for drop in model.drop_list:
+    #     print(f"Dropout rate: {drop.p}, mask type: {drop.mask_type}, "
+    #           f"elasticity: {drop.elasticity}, scaler: {drop.scaler}")
     # print(f"[MyVisionTransformer] Dropout rate: {model.drop_rate}")
     model_ema = None
     if args.model_ema:

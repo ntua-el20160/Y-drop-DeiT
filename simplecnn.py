@@ -133,7 +133,7 @@ class CNN6_S1(nn.Module):
                 else:
                     # Accumulate the score_mean
                     model_clone.scores[f'drop_{i}'] += score_mean
-
+        print(len(batches))
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
