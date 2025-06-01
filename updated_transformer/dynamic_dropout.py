@@ -573,12 +573,11 @@ class MyDropout(nn.Module):
             full_key = prefix + key
             if full_key in state_dict:
                 checkpoint_val = state_dict[full_key]
-                current_val = getattr(self, key)
-                if current_val.numel() == 0:
-                    # Replace the uninitialized buffer with the checkpoint tensor.
-                    setattr(self, key, checkpoint_val)
-                    # Remove the key so that the parent's loader doesn't attempt to load it.
-                    del state_dict[full_key]
+
+                # Replace the uninitialized buffer with the checkpoint tensor.
+                setattr(self, key, checkpoint_val)
+                # Remove the key so that the parent's loader doesn't attempt to load it.
+                del state_dict[full_key]
         super(MyDropout, self)._load_from_state_dict(state_dict, prefix, local_metadata,
                                                      strict, missing_keys, unexpected_keys, error_msgs)
         # Remove our keys from missing_keys since we've already loaded them.

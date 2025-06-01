@@ -413,6 +413,10 @@ def main(args):
         best_acc = 0.0
         patience_counter = 0
     
+    # print("Start")
+    # for drop in model.drop_list:
+    #     print(f"scaling: {drop.scaling}")
+    # print("Rest")
     if args.update_scaling == 'increasing':
 
         update_freq = 1
@@ -496,8 +500,12 @@ def main(args):
         
         if check and stats:
             model.update_progression(output_dir / 'plots')
+            model.plot_progression_statistics(output_dir / 'plots',label = "")
             model.save_statistics(epoch_dir)
             plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
+            model.clear_progression()
+
+
         
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)

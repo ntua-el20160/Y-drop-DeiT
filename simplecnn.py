@@ -133,7 +133,6 @@ class CNN6_S1(nn.Module):
                 else:
                     # Accumulate the score_mean
                     model_clone.scores[f'drop_{i}'] += score_mean
-        print(len(batches))
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
@@ -388,9 +387,10 @@ def main(args):
         best_acc = 0.0
         history = {}
         best_loss = float('inf')
-
-
-        
+    # print("Start")
+    # for drop in model.drop_list:
+    #     print(f"scaling: {drop.scaling}")
+    # print("Rest")
     if args.update_scaling == 'increasing':
 
         update_freq = 1
@@ -475,7 +475,7 @@ def main(args):
             model.save_statistics(epoch_dir)
 
             plot_epoch_statistics(output_dir, epoch+1, epoch_dir_image)
-            #model.plot_progression_statistics(output_dir / 'plots',label = "")
+            model.plot_progression_statistics(output_dir / 'plots',label = "")
             #model.plot_aggregated_statistics(f'Epoch {epoch+1} ', epoch_dir)
             #model.plot_random_node_histograms_scoring(f'Epoch {epoch+1} ', epoch_dir)
             #model.plot_random_node_histograms_keep(f'Epoch {epoch+1} ', output_dir / 'plots')
