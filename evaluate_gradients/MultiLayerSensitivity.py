@@ -82,6 +82,8 @@ class MultiLayerSensitivity(LayerAttribution, GradientAttribution):
                     # For weights, sum over the input dimension.
                     # (Assumes weight shape is [out_features, in_features])
                     if sens.dim() > 1:
+                        #weights_amount = sens.numel() // sens.shape[0]
+                        weights_count = sens.shape[0]
                         layer_weight_agg = sens.sum(dim=1)
                     else:
                         layer_weight_agg = sens
@@ -95,9 +97,9 @@ class MultiLayerSensitivity(LayerAttribution, GradientAttribution):
             if layer_weight_agg is None:
                 combined = layer_bias_agg
             elif layer_bias_agg is None:
-                combined = layer_weight_agg
+                combined = layer_weight_agg/weights_count
             else:
-                combined = layer_weight_agg + layer_bias_agg
+                combined = (layer_weight_agg + layer_bias_agg)/(weights_count+1)
             sens_list.append(combined)
         
         # Format output similar to conductance (if a single module was provided).

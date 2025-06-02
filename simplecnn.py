@@ -137,7 +137,7 @@ class CNN6_S1(nn.Module):
         for i, drop_layer in enumerate(model_clone.drop_list):
             drop_layer.update_dropout_masks(
                 #CHANGE TO CHECK: diving by the number of batches to get the average score
-                model_clone.scores[f'drop_{i}']/len(batches),
+                model_clone.scores[f'drop_{i}']/float(len(batches)),
                 #model_clone.scores[f'drop_{i}'],
                 stats=stats
             )

@@ -136,7 +136,7 @@ class MyVisionTransformer(VisionTransformer):
 
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
-            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}']/len(batches), stats=stats)
+            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}']/float(len(batches)), stats=stats)
 
 
 
