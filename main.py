@@ -332,22 +332,22 @@ def main(args):
     #           f"elasticity: {drop.elasticity}, scaler: {drop.scaler}")
     # print(f"[MyVisionTransformer] Dropout rate: {model.drop_rate}")
     model_ema = None
-    # if args.model_ema:
-    #     # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-    #     model_ema = ModelEma(
-    #         model,
-    #         decay=args.model_ema_decay,
-    #         device=device if args.model_ema_force_cpu else '', ## was device = cpu
-    #         resume='')
     if args.model_ema:
-    # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
-       ema_device = 'cpu' if args.model_ema_force_cpu else device
-       model_ema = ModelEma(
-           model,
-           decay=args.model_ema_decay,
-           device=ema_device,
-           resume=''
-     )
+        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        model_ema = ModelEma(
+            model,
+            decay=args.model_ema_decay,
+            device="cpu" if args.model_ema_force_cpu else '', ## was device = cpu
+            resume='')
+    # if args.model_ema:
+    # # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
+    #    ema_device = 'cpu' if args.model_ema_force_cpu else device
+    #    model_ema = ModelEma(
+    #        model,
+    #        decay=args.model_ema_decay,
+    #        device=ema_device,
+    #        resume=''
+    #  )
 
 
     model_without_ddp = model
@@ -408,6 +408,7 @@ def main(args):
             patience_counter = checkpoint.get('patience_counter', 0)
             patience_counter = checkpoint.get('patience_counter', 0)
         except Exception as e:
+            print("Error loading:",e)    
             best_loss = float('inf')
             saved_epoch = 0
             cumulative_train_time = 0.0
