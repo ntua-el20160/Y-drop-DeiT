@@ -65,8 +65,17 @@ def prune_selected_layers(
         """
         orig_out, orig_in = orig_linear.out_features, orig_linear.in_features
         # Build a mask of length=orig_out
+        flat_prune = []
+        for idx in prune_indices:
+            if isinstance(idx, tuple):
+                if len(idx) != 1:
+                    raise ValueError(f"Expected a 1-tuple for a 1-dimensional layer. Got {idx}.")
+                flat_prune.append(idx[0])
+            else:
+                flat_prune.append(idx)
+
         keep_mask = torch.ones(orig_out, dtype=torch.bool)
-        keep_mask[prune_indices] = False
+        keep_mask[flat_prune] = False
         new_out = keep_mask.sum().item()
 
         # Create the new Linear

@@ -337,7 +337,7 @@ def main(args):
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
-            device='cpu' if args.model_ema_force_cpu else '',
+            device=device if args.model_ema_force_cpu else '', ## was device = 'cpu'
             resume='')
 
     model_without_ddp = model

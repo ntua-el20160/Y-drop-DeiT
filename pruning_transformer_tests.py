@@ -289,7 +289,7 @@ def main(args):
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
             resume='')
-        model_without_ddp = model
+    model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
@@ -350,6 +350,8 @@ def main(args):
                                 pruning_rate= args.pruning_rate,
                                 pruning_type=args.pruning_type)
     print(f"Pruning indices: {prune_indices}")
+    prune_vit_blocks(model=model,
+                    prune_map=prune_indices)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT Training Script', parents=[get_args_parser()])

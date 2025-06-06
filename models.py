@@ -139,7 +139,6 @@ class MyVisionTransformer(VisionTransformer):
             drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}']/float(len(batches)), stats=stats)
 
 
-
         #load the update on the model from the copy
         for i,_ in enumerate(model_clone.drop_list):
             self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())

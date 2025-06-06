@@ -41,12 +41,16 @@ def select_pruning_indices(
     Returns:
         prune_indices: a dict mapping each layer‐index `i` to a list of neuron‐indices to remove.
     """   
-    model.eval()  
-    num_layers = len(model.selected_layers)
+    torch.cuda.empty_cache()
+    model_clone = copy.deepcopy(model)
+    model_clone.to(device)
+    model_clone.eval()  
+    #model.eval()  
+    num_layers = len(model_clone.selected_layers)
     # Initialize conductances for each layer
     for i in range(num_layers):
-        model.scores[f"drop_{i}"] = None
-    plot_freq = 50
+        model_clone.scores[f"drop_{i}"] = None
+    plot_freq = 10
     new_iter = iter(data_loader)
     for b in range(batches_num):
         try:
@@ -60,26 +64,26 @@ def select_pruning_indices(
         baseline = torch.zeros_like(x_captum)
 
         #forward + predict labels
-        outputs = model(x_captum)
+        outputs = model_clone(x_captum)
         pred = outputs.argmax(dim=1)
 
    
          # choose between Conductance / Sensitivity
         if scoring_type == "Conductance":
-            mlc = MultiLayerConductance(model, model.selected_layers)
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
             captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
+                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
             )
         elif scoring_type == "Sensitivity":
-            mlc = MultiLayerSensitivity(model, model.selected_layers)
+            mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
             captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
+                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
             )
         else:
             # fallback to Conductance
-            mlc = MultiLayerConductance(model, model.selected_layers)
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
             captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
+                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
             )
 
         # Average out the conductance across the batch and add it
@@ -93,34 +97,37 @@ def select_pruning_indices(
                 score_mean = score_tensor.mean(dim=0)
 
             key = f"drop_{layer_idx}"
-            if model.scores[key] is None:
-                model.scores[key] = score_mean.clone().detach()
+            if model_clone.scores[key] is None:
+                model_clone.scores[key] = score_mean.clone().detach()
             else:
-                model.scores[key] += score_mean.detach()
+                model_clone.scores[key] += score_mean.detach()
            # 3) --- average the accumulated scores over `batches_num`
 # -------------------------------------------------------------------------
     for i in range(num_layers):
         key = f"drop_{i}"
-        if model.scores[key] is not None:
-            model.scores[key] = model.scores[key] / float(batches_num)
+        if model_clone.scores[key] is not None:
+            model_clone.scores[key] = model_clone.scores[key] / float(batches_num)
         else:
             raise RuntimeError(f"No scores were computed for layer {i}. Did data_loader run out of data?")
     for i in range(num_layers):
         key = f"drop_{i}"
-        print(f"Layer {i} scores: {model.scores[key].mean().item():.4f} (std: {model.scores[key].std().item():.4f})")
+        print(f"Layer {i} scores: {model_clone.scores[key].mean().item():.4f} (std: {model_clone.scores[key].std().item():.4f})")
     # -------------------------------------------------------------------------
     # 4) --- collect all layer‐wise score‐tensors, compute total # of neurons
     # -------------------------------------------------------------------------
+    torch.cuda.empty_cache()
+
     layer_scores: List[torch.Tensor] = []
     layer_sizes: List[int] = []
     for i in range(num_layers):
-        scores_i = model.scores[f"drop_{i}"]  # shape: [N_i]
+        scores_i = model_clone.scores[f"drop_{i}"]  # shape: [N_i]
         # flatten to compute mean/std and rank
 
         flat_scores = scores_i.view(-1)
         layer_scores.append(scores_i)
         layer_sizes.append(flat_scores.numel())
-
+    del model_clone
+    torch.cuda.empty_cache()
     total_neurons = sum(layer_sizes)
     N_remove = math.ceil(pruning_rate * total_neurons)
 
@@ -281,13 +288,17 @@ def select_pruning_indices(
     # ----------------------------------------------------------------------------
     # 8) --- return the dictionary of indices to prune
     # ----------------------------------------------------------------------------
-    for key, tuple_list in prune_indices.items():
-        x = []
-        for tup in tuple_list:
-            if isinstance(tup, int):
-                x.append(tup)
-            elif isinstance(tup, tuple):
-                x.append(tup[0])
-        prune_indices[key] = x
+    # y= 0
+    # for key, tuple_list in prune_indices.items():
+    #     x = []
+    #     for tup in tuple_list:
+    #         if y == 1:
+    #             print(tup)
+    #         if isinstance(tup, int):
+    #             x.append(tup)
+    #         elif isinstance(tup, tuple):
+    #             x.append(tup[0])
+    #     y=1
+    #     prune_indices[key] = x
 
     return prune_indices
