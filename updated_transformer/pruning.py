@@ -1,278 +1,171 @@
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the CC-by-NC license found in the
-# LICENSE file in the root directory of this source tree.
-import math
 import torch
 import torch.nn as nn
-from functools import partial
-from torch.jit import Final
-from typing import Type, Optional, Iterable, Dict, List
-import torch.nn.functional as F
-import copy
-from captum.attr import LayerConductance
-from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
-from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
-from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
-from timm.models import register_model
-from timm.layers import PatchEmbed, use_fused_attn, DropPath, trunc_normal_
+from typing import Dict, List, Tuple
 
-from updated_transformer.block import Block
-from updated_transformer.mlp import Mlp
-
-def pruning(
-    model: torch.nn.Module,
-    data_loader: Iterable,
-    device: torch.device,
-    scoring_type: str = "Conductance",
-    batches_num: int = 10,
-    pruning_rate: float = 0.2,
-    pruning_type: str = "Normalization"
-) -> Dict[int, List[int]]:
+def prune_selected_layers(
+    model: nn.Module,
+    prune_map: Dict[int, List[int]]
+) -> None:
     """
-    Compute per-layer importance scores (already stored in model.scores['drop_i']),
-    then prune a fraction `pruning_rate` of *neurons* (not individual weights) 
-    using one of three strategies:
-      1. "Normalization"  -> layer-wise z-score, then global threshold
-      2. "Quota"          -> fix a count k_ℓ per-layer, then drop bottom k_ℓ within that layer
-      3. "Hybrid"         -> convert to layer-wise percentiles, then global rank
-
-    Returns:
-        prune_indices: a dict mapping each layer‐index `i` to a list of neuron‐indices to remove.
-    """   
-    model.eval()  
-    num_layers = len(model.selected_layers)
-    # Initialize conductances for each layer
-    for i in range(num_layers):
-        model.scores[f"drop_{i}"] = None
-
-    new_iter = iter(data_loader)
-    for _ in range(batches_num):
-        try:
-            batch = next(new_iter)
-        except StopIteration:
-            break
-        x, _ = batch
-        x_captum = x.detach().clone().requires_grad_().to(device, non_blocking=True)
-        baseline = torch.zeros_like(x_captum)
-
-        #forward + predict labels
-        outputs = model(x_captum)
-        pred = outputs.argmax(dim=1)
-
-   
-         # choose between Conductance / Sensitivity
-        if scoring_type == "Conductance":
-            mlc = MultiLayerConductance(model, model.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
-            )
-        elif scoring_type == "Sensitivity":
-            mlc = MultiLayerSensitivity(model, model.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
-            )
-        else:
-            # fallback to Conductance
-            mlc = MultiLayerConductance(model, model.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model.n_steps
-            )
-
-        # Average out the conductance across the batch and add it
-        # captum_attrs is a list (length num_layers) of tensors shaped [batch_size, #neurons_in_that_layer].
-        # We average them over the batch dimension before accumulating.
-        for layer_idx, score_tensor in enumerate(captum_attrs):
-            # if using Conductance, average across batch; if using Sensitivity, `score_tensor` is already [#neurons]
-            if scoring_type == "Sensitivity":
-                score_mean = score_tensor.clone()
-            else:
-                score_mean = score_tensor.mean(dim=0)
-
-            key = f"drop_{layer_idx}"
-            if model.scores[key] is None:
-                model.scores[key] = score_mean.clone().detach()
-            else:
-                model.scores[key] += score_mean.detach()
-           # 3) --- average the accumulated scores over `batches_num`
-    # -------------------------------------------------------------------------
-        for i in range(num_layers):
-            key = f"drop_{i}"
-            if model.scores[key] is not None:
-                model.scores[key] = model.scores[key] / float(batches_num)
-            else:
-                raise RuntimeError(f"No scores were computed for layer {i}. Did data_loader run out of data?")
-    # -------------------------------------------------------------------------
-    # 4) --- collect all layer‐wise score‐tensors, compute total # of neurons
-    # -------------------------------------------------------------------------
-    layer_scores: List[torch.Tensor] = []
-    layer_sizes: List[int] = []
-    for i in range(num_layers):
-        scores_i = model.scores[f"drop_{i}"]  # shape: [N_i]
-        # flatten to compute mean/std and rank
-
-        flat_scores = scores_i.view(-1)
-        layer_scores.append(scores_i)
-        layer_sizes.append(flat_scores.numel())
-
-    total_neurons = sum(layer_sizes)
-    N_remove = math.ceil(pruning_rate * total_neurons)
-
-    prune_indices: Dict[int, List[int]] = {i: [] for i in range(num_layers)}
-
-    if pruning_type.lower() == "normalization":
-        candidates = []
-        for i, scores in enumerate(layer_scores):
-            mi = scores.mean()
-            sig = scores.std(unbiased=False) + 1e-8  # avoid divide‐by‐zero
-            z_scores = (scores - mi) / sig
-            for neuron_idx in range(z_scores.size(0)):
-                candidates.append((z_scores[neuron_idx].item(), i, neuron_idx))
-        candidates.sort(key=lambda x: x[0])
-        to_prune = candidates[:N_remove]
-        for (_, layer_i, flat_j) in to_prune:
-            shape = layer_scores[layer_i].shape
-            idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-            prune_indices[layer_i].append(idx_multi)
-
-    elif pruning_type.lower() == "quota":
-        k_list = [math.floor(pruning_rate * N_i) for N_i in layer_sizes]
-        sum_k = sum(k_list)
-        
-        # 2.b) Adjust to hit exact global target
-        if sum_k < N_remove:
-            diff = N_remove - sum_k
-            # compute average score per layer (lower avg → less important on average)
-            avg_scores = [(layer_scores[i].view(-1).mean().item(), i) for i in range(num_layers)]
-            # sort by ascending avg (least important first)
-            avg_scores.sort(key=lambda x: x[0])
-            idx = 0
-            while diff > 0:
-                layer_to_inc = avg_scores[idx % num_layers][1]
-                k_list[layer_to_inc] += 1
-                diff -= 1
-                idx += 1
-
-        elif sum_k > N_remove:
-            diff = sum_k - N_remove
-            # sort layers by descending average importance (we reduce from most "sensitive" layers)
-            avg_scores = [(layer_scores[i].view(-1).mean().item(), i) for i in range(num_layers)]
-            avg_scores.sort(key=lambda x: -x[0])
-            idx = 0
-            while diff > 0:
-                layer_to_dec = avg_scores[idx % num_layers][1]
-                if k_list[layer_to_dec] > 0:
-                    k_list[layer_to_dec] -= 1
-                    diff -= 1
-                idx += 1
-        for i, scores in enumerate(layer_scores):
-            k_i = k_list[i]
-            if k_i <= 0:
-                continue
-
-            flat_scores = scores.view(-1)
-            sorted_idx = torch.argsort(flat_scores)  # ascending
-            bottom_k = sorted_idx[:k_i].tolist()
-            for flat_j in bottom_k:
-                shape = scores.shape
-                idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-                prune_indices[i].append(idx_multi)
+    Given a model with `model.selected_layers = [layer0, layer1, ...]`
+    and a `prune_map` mapping each selected-layer index i to a list of
+    output-neuron indices to remove from that layer, this function
+    (in-place) rebuilds each selected nn.Linear so that its outputs
+    are pruned. It then also adjusts the *inputs* of the next Linear
+    in the chain (whether selected or not) so that dimensions match.
     
-    elif pruning_type.lower() == "quotweighted" or pruning_type.lower() == "quotaweighted":
-        # 3.a) Compute average importance per layer: s̄_ℓ = mean(flat_scores_ℓ)
-        avg_importances = []
-        for i, scores in enumerate(layer_scores):
-            flat_scores = scores.view(-1)
-            s_bar = flat_scores.mean().item()
-            # Avoid division by zero; if a layer's average is zero, treat as very small epsilon
-            if abs(s_bar) < 1e-12:
-                s_bar = 1e-12
-            avg_importances.append((s_bar, i))
+    Assumptions:
+    1. `model.selected_layers` is a Python list of nn.Linear modules,
+       in the order they appear in the forward pass (so output of
+       selected_layers[i] feeds directly into selected_layers[i+1], or
+       into a final classifier).
+    2. The final classifier (e.g. `model.fc3` in CNN6_S1) is a
+       nn.Linear whose `in_features` == the original `out_features`
+       of the last selected layer. We will prune its input columns.
+    
+    This function replaces each module in-place, so no return value.
+    """
 
-        # 3.b) Compute weights w_ℓ = 1 / s̄_ℓ (higher s̄_ℓ → smaller weight → prune fewer)
-        weights = []
-        for s_bar, i in avg_importances:
-            weights.append((1.0 / s_bar, i))
+    # ------------------------------------------------------------------------
+    # Helper to find the (qualified) name of a module inside `model`
+    # and return (parent_module, attribute_name) so we can call setattr.
+    # ------------------------------------------------------------------------
+    def _find_parent_and_attr(root: nn.Module, child: nn.Module) -> Tuple[nn.Module, str]:
+        """
+        Traverse root.named_modules() to locate where `child` appears as a direct
+        attribute. Returns (parent_module, attribute_name) so that
+            setattr(parent_module, attribute_name, new_module)
+        will replace it.
+        """
+        #root: the whole model, child: a submodule (nn.Linear)
+        #parent_module: the parent of child(holds child as one of it's attributes), attribute_name: the name of child in parent_module
+        
+        for qualified_name, module in root.named_modules():#searches all modules in the model, they have the form like (strin:"conv1", the actual module: nn.Conv2d)
+            if module is child:
+                # If qualified_name == "", then child == root itself. We do not
+                # handle replacing root; assume selected_layers are submodules.
+                if "." not in qualified_name:
+                    return root, qualified_name  # rare: child is assigned as root.attr ""
+                # Otherwise split by last dot
+                parent_name, attr_name = qualified_name.rsplit(".", 1)
+                parent = root
+                for part in parent_name.split("."):
+                    parent = getattr(parent, part)
+                return parent, attr_name
+        raise ValueError(f"Module {child} not found in model as a submodule.")
 
-        # 3.c) Normalize weights so that sum of (weight_ℓ) = 1
-        total_weight = sum(w for w, _ in weights)
-        normalized = [(w / total_weight, i) for w, i in weights]
+    # ------------------------------------------------------------------------
+    # Helper to prune a single nn.Linear's outputs by index list.
+    # ------------------------------------------------------------------------
+    def _prune_linear_outputs(orig_linear: nn.Linear, prune_indices: List[int]) -> Tuple[nn.Linear, torch.Tensor]:
+        """
+        Build a new nn.Linear whose `out_features = orig_out - len(prune_indices)`,
+        copying over the surviving rows of weight & bias. Also return a boolean
+        `keep_mask` of length orig_out, True if that output index is kept.
+        """
+        orig_out, orig_in = orig_linear.out_features, orig_linear.in_features
+        # Build a mask of length=orig_out
+        keep_mask = torch.ones(orig_out, dtype=torch.bool)
+        keep_mask[prune_indices] = False
+        new_out = keep_mask.sum().item()
 
-        # 3.d) Compute raw quotas: r_ℓ = normalized_weight_ℓ * N_remove
-        raw_quotas = [(rw * N_remove, i) for rw, i in normalized]
+        # Create the new Linear
+        new_linear = nn.Linear(in_features=orig_in, out_features=new_out, bias=(orig_linear.bias is not None))
 
-        # 3.e) Round each to nearest integer: k_list[i] = round(r_ℓ)
-        k_list = [0] * num_layers
-        for rq, i in raw_quotas:
-            k_list[i] = int(round(rq))
+        with torch.no_grad():
+            # Copy surviving rows of weight: orig_linear.weight has shape [orig_out, orig_in]
+            new_linear.weight.copy_(orig_linear.weight[keep_mask, :])
+            # Copy surviving bias entries if present
+            if orig_linear.bias is not None:
+                new_linear.bias.copy_(orig_linear.bias[keep_mask])
 
-        # 3.f) Fix rounding error so sum(k_list) == N_remove
-        sum_k = sum(k_list)
-        if sum_k < N_remove:
-            diff = N_remove - sum_k
-            # Distribute extra slots to layers with smallest average importance
-            avg_scores_sorted = sorted(avg_importances, key=lambda x: x[0])  # ascending s̄_ℓ
-            idx = 0
-            while diff > 0:
-                layer_to_inc = avg_scores_sorted[idx % num_layers][1]
-                k_list[layer_to_inc] += 1
-                diff -= 1
-                idx += 1
-        elif sum_k > N_remove:
-            diff = sum_k - N_remove
-            # Remove extra slots from layers with largest average importance
-            avg_scores_sorted = sorted(avg_importances, key=lambda x: -x[0])  # descending s̄_ℓ
-            idx = 0
-            while diff > 0:
-                layer_to_dec = avg_scores_sorted[idx % num_layers][1]
-                if k_list[layer_to_dec] > 0:
-                    k_list[layer_to_dec] -= 1
-                    diff -= 1
-                idx += 1
+        return new_linear, keep_mask
 
-        # 3.g) Finally, prune exactly k_list[i] neurons from layer i
-        for i, scores in enumerate(layer_scores):
-            k_i = k_list[i]
-            if k_i <= 0:
-                continue
+    # ------------------------------------------------------------------------
+    # Helper to prune a single nn.Linear's inputs by a boolean mask
+    # (i.e. remove certain columns). Returns a new nn.Linear.
+    # ------------------------------------------------------------------------
+    def _prune_linear_inputs(orig_linear: nn.Linear, keep_mask: torch.Tensor) -> nn.Linear:
+        """
+        Given an existing nn.Linear with weight shape [out_features, in_features],
+        and a boolean keep_mask of length in_features, create a new nn.Linear
+        with in_features = keep_mask.sum(), copying only the columns where keep_mask=True.
+        Bias is unchanged.
+        """
+        orig_out, orig_in = orig_linear.out_features, orig_linear.in_features
+        if keep_mask.numel() != orig_in:
+            raise ValueError(f"Input-mask length {keep_mask.numel()} != orig in_features {orig_in}")
 
-            flat_scores = scores.view(-1)
-            sorted_idx = torch.argsort(flat_scores)  # ascending
-            bottom_k = sorted_idx[:k_i].tolist()
-            for flat_j in bottom_k:
-                shape = scores.shape
-                idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-                prune_indices[i].append(idx_multi)
-    elif pruning_type.lower() == "hybrid":
-        candidates = []  # list of (percentile, layer_idx, flat_idx)
-        for i, scores in enumerate(layer_scores):
-            flat_scores = scores.view(-1)
-            N_i = flat_scores.numel()
-            if N_i == 0:
-                continue
+        new_in = keep_mask.sum().item()
+        new_linear = nn.Linear(in_features=new_in, out_features=orig_out, bias=(orig_linear.bias is not None))
 
-            sorted_idx = torch.argsort(flat_scores)  # ascending
-            # sorted_idx[j] is the flat index of j-th smallest score; percentile = (j+1)/N_i
-            for rank_pos, flat_j in enumerate(sorted_idx):
-                r = float(rank_pos + 1) / float(N_i)
-                candidates.append((r, i, int(flat_j.item())))
+        with torch.no_grad():
+            # Copy only columns where keep_mask is True
+            kept_cols = keep_mask.nonzero(as_tuple=False).squeeze(1)  # shape [new_in]
+            # orig_linear.weight is [orig_out, orig_in]
+            new_linear.weight.copy_(orig_linear.weight[:, kept_cols])
+            if orig_linear.bias is not None:
+                new_linear.bias.copy_(orig_linear.bias)
 
-        # sort ascending by percentile → lowest percentile = least important
-        candidates.sort(key=lambda x: x[0])
+        return new_linear
 
-        to_prune = candidates[:N_remove]
-        for (_, layer_i, flat_j) in to_prune:
-            shape = layer_scores[layer_i].shape
-            idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-            prune_indices[layer_i].append(idx_multi)
+    # --------------------------------------------------------------
+    # Step 1: Locate each selected layer in `model` by name, so we can replace it.
+    # We'll build a list of (layer_module, parent_module, attr_name).
+    # --------------------------------------------------------------
+    selected = model.selected_layers  # list of nn.Module (Linear) references
+    layer_replacements = []  # will hold tuples [(orig_layer, parent, attr), ...]
+    for layer in selected:
+        parent_mod, attr_name = _find_parent_and_attr(model, layer)
+        layer_replacements.append((layer, parent_mod, attr_name))
 
-    else:
-        raise ValueError(
-            f"Unknown pruning_type '{pruning_type}'. Choose 'Normalization', 'Quota', or 'Hybrid'."
-        )
+    # --------------------------------------------------------------
+    # Step 2: Prune in a chain. For each selected layer i:
+    #   (A) Prune its outputs using prune_map[i] → obtain new_layer_i, keep_mask_i
+    #   (B) Replace the module in the model graph
+    #   (C) Prune the *inputs* of the next Linear:
+    #         if next selected layer exists, prune its inputs by keep_mask_i
+    #         else prune all Linear modules whose in_features match original out_i.
+    # We do this in the order of selected_layers.
+    # --------------------------------------------------------------
+    # We keep track of the original out_features of each layer to find downstream match.
+    original_out_features = [layer.out_features for layer in selected]
 
-    # ----------------------------------------------------------------------------
-    # 8) --- return the dictionary of indices to prune
-    # ----------------------------------------------------------------------------
-    return prune_indices
+    for idx, (orig_layer, parent_mod, attr_name) in enumerate(layer_replacements):
+        # 2.A) Prune orig_layer's outputs
+        to_prune = prune_map.get(idx, [])
+        new_layer, keep_mask = _prune_linear_outputs(orig_layer, to_prune)
+
+        # 2.B) Replace orig_layer with new_layer in the model
+        setattr(parent_mod, attr_name, new_layer)
+
+        # 2.C) Now prune inputs of the next layer in the chain
+        # If there is a next selected layer:
+        if idx + 1 < len(layer_replacements):
+            next_layer, next_parent, next_attr = layer_replacements[idx + 1]
+            # But note: next_layer is still the *old* nn.Linear instance; we must replace it too.
+            # First, prune its inputs by the keep_mask we just produced.
+            pruned_next = _prune_linear_inputs(next_layer, keep_mask)
+            # Now replace next_layer with this pruned‐input version *temporarily*; we will prune its outputs later,
+            # so update `layer_replacements[idx+1]` to point to `pruned_next` so that the output‐pruning step
+            # uses the updated module.
+            setattr(next_parent, next_attr, pruned_next)
+            # Update our tuple so that the next iteration sees pruned_next as the layer to prune outputs of.
+            layer_replacements[idx + 1] = (pruned_next, next_parent, next_attr)
+
+        else:
+            # No next selected layer: we prune any final classifier(s) that consume orig_layer's outputs.
+            # We look for any nn.Linear in model whose in_features == original_out_features[idx].
+            # For each such linear, we prune its inputs by keep_mask.
+            consumed_out = original_out_features[idx]
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Linear) and module.in_features == consumed_out:
+                    # Locate parent so we can replace it
+                    parent_mod2, attr_name2 = _find_parent_and_attr(model, module)
+                    pruned_final = _prune_linear_inputs(module, keep_mask)
+                    setattr(parent_mod2, attr_name2, pruned_final)
+
+    # --------------------------------------------------------------
+    # All selected layers (and downstream classifiers) have now been replaced
+    # in the original model in-place. No return value.
+    # --------------------------------------------------------------

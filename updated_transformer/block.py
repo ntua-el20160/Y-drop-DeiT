@@ -80,7 +80,7 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        self.selected_layers = [self.attn.attention_identity_layer,self.attn.proj,self.mlp.act,self.mlp.fc2]
+        self.selected_layers = [self.attn.attention_identity_layer,self.attn.proj,self.mlp.fc1,self.mlp.fc2]
         self.drop_list = [self.attn.attn_drop,self.attn.proj_drop,self.mlp.drop1,self.mlp.drop2]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
