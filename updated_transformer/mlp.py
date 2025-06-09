@@ -52,10 +52,10 @@ class Mlp(nn.Module):
         print(f"[Mlp] ydrop: {ydrop}, drop: {drop}, mask_type: {mask_type}, "
               f"elasticity: {elasticity}, scaler: {scaler}")
         linear_layer = partial(nn.Conv2d, kernel_size=1) if use_conv else nn.Linear
-        print(in_features,hidden_features)
+        #print(in_features,hidden_features)
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer()
-        print(self.fc1)
+        #print(self.fc1)
         if ydrop is True:
             self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler, transformer_mean=transformer_mean)
         else:
@@ -63,7 +63,7 @@ class Mlp(nn.Module):
         
         self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
-        print(self.fc2)
+        #print(self.fc2)
         #print(hidden_features, out_features)
         
 
@@ -76,7 +76,7 @@ class Mlp(nn.Module):
     def forward(self, x):
         x = self.fc1(x)
         x_act = self.act(x)
-        print(x_act.shape)
+        #print(x_act.shape)
         #print("Mlp layer1 shape:", self.fc1.weight.shape)
 
         # Save the output after activation if hooks are set.
@@ -86,7 +86,7 @@ class Mlp(nn.Module):
         #print("Mlp layer1 shape:", self.fc2.weight.shape)
 
 
-        print(x_fc2.shape)
+        #print(x_fc2.shape)
         # Save the output after fc2.
         x_drop2 = self.drop2(x_fc2)
         return x_drop2

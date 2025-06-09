@@ -51,7 +51,7 @@ class Attention(nn.Module):
         self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attention_identity_layer = nn.Identity()
         self.pruning_identity_layer = nn.Identity()
-        print(self.qkv)
+        #print(self.qkv)
         print(f"[Attention] ydrop: {ydrop}, attn_drop: {attn_drop}, proj_drop: {proj_drop}, "
               f"mask_type: {mask_type}, elasticity: {elasticity}, scaler: {scaler}")
 
@@ -61,7 +61,7 @@ class Attention(nn.Module):
         else:
             self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
-        print(self.proj)
+        #print(self.proj)
         if ydrop is True:
             self.proj_drop = MyDropout(elasticity=elasticity, p=proj_drop, tied_layer=self.proj, mask_type=mask_type, scaler=scaler,transformer_mean=transformer_mean)
         else:
@@ -74,7 +74,7 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
-        print(q.shape, k.shape, v.shape)
+        #print(q.shape, k.shape, v.shape)
         if self.fused_attn:
             x,_ = F.scaled_dot_product_attention(
                 q, k, v,
@@ -84,11 +84,11 @@ class Attention(nn.Module):
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
             attn =self.attention_identity_layer(attn)
-            print(attn.shape)
+            #print(attn.shape)
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
-        print(x.shape)
+       #print(x.shape)
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.pruning_identity_layer(x)
         x = self.proj(x)
