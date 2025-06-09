@@ -40,30 +40,35 @@ class Mlp(nn.Module):
             mask_type: Optional[str] = 'sigmoid',
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
+            transformer_mean: bool = False
     ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         bias = to_2tuple(bias)
         drop_probs = to_2tuple(drop)
+        
 
         print(f"[Mlp] ydrop: {ydrop}, drop: {drop}, mask_type: {mask_type}, "
               f"elasticity: {elasticity}, scaler: {scaler}")
         linear_layer = partial(nn.Conv2d, kernel_size=1) if use_conv else nn.Linear
+        print(in_features,hidden_features)
         self.fc1 = linear_layer(in_features, hidden_features, bias=bias[0])
         self.act = act_layer()
-
+        print(self.fc1)
         if ydrop is True:
-            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler)
+            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler, transformer_mean=transformer_mean)
         else:
             self.drop1 = nn.Dropout(drop_probs[0])
         
         self.norm = norm_layer(hidden_features) if norm_layer is not None else nn.Identity()
         self.fc2 = linear_layer(hidden_features, out_features, bias=bias[1])
+        print(self.fc2)
+        #print(hidden_features, out_features)
         
 
         if ydrop is True:
-            self.drop2 = MyDropout(elasticity=elasticity, p=drop_probs[1], tied_layer=self.fc2, mask_type=mask_type, scaler=scaler)
+            self.drop2 = MyDropout(elasticity=elasticity, p=drop_probs[1], tied_layer=self.fc2, mask_type=mask_type, scaler=scaler, transformer_mean=transformer_mean)
         else:
             self.drop2 = nn.Dropout(drop_probs[1])
             
@@ -71,10 +76,17 @@ class Mlp(nn.Module):
     def forward(self, x):
         x = self.fc1(x)
         x_act = self.act(x)
+        print(x_act.shape)
+        #print("Mlp layer1 shape:", self.fc1.weight.shape)
+
         # Save the output after activation if hooks are set.
         x_drop1 = self.drop1(x_act)
         x_norm = self.norm(x_drop1)
         x_fc2 = self.fc2(x_norm)
+        #print("Mlp layer1 shape:", self.fc2.weight.shape)
+
+
+        print(x_fc2.shape)
         # Save the output after fc2.
         x_drop2 = self.drop2(x_fc2)
         return x_drop2

@@ -177,6 +177,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    transformer_mean = kwargs.pop('transformer_mean', False)
 
     print("[Registered Model - Tiny] drop_rate:", drop)
     print("[Registered Model - Tiny] ydrop:", ydrop)
@@ -184,6 +185,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model - Tiny] elasticity:", elasticity)
     print("[Registered Model - Tiny] scaler:", scaler)
     print("[Registered Model - Tiny] n_steps:", n_steps)
+    print("[Registered Model - Tiny] transformer_mean:", transformer_mean)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -198,6 +200,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        transformer_mean=transformer_mean,  # Pass transformer
     )
     mlp_partial = partial(
         Mlp,
@@ -206,6 +209,7 @@ def deit_tiny_patch16_224(pretrained=False, **kwargs):
         elasticity=elasticity,
         scaler=scaler,
         drop=drop,  # Use the same drop or separate if desired
+        transformer_mean=transformer_mean,  # Pass transformer
     )
 
     # Build MyVisionTransformer using your partials
@@ -250,6 +254,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    transformer_mean = kwargs.pop('transformer_mean', False)
 
     print("[Registered Model - Small] drop_rate:", drop)
     print("[Registered Model - Small] ydrop:", ydrop)
@@ -257,6 +262,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model - Small] elasticity:", elasticity)
     print("[Registered Model - Small] scaler:", scaler)
     print("[Registered Model - Small] n_steps:", n_steps)
+    print("[Registered Model - Small] transformer_mean:", transformer_mean)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -271,6 +277,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        transformer_mean=transformer_mean,  # Pass transformer
     )
     mlp_partial = partial(
         Mlp,
@@ -279,6 +286,7 @@ def deit_small_patch16_224(pretrained=False, **kwargs):
         elasticity=elasticity,
         scaler=scaler,
         drop=drop,
+        transformer_mean=transformer_mean,  # Pass transformer
     )
 
     # Build MyVisionTransformer using your partials
@@ -322,6 +330,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
     elasticity = kwargs.pop('elasticity', 0.01)
     scaler = kwargs.pop('scaler', 1.0)
     n_steps = kwargs.pop('n_steps', 5)
+    transformer_mean = kwargs.pop('transformer_mean', False)
 
     print("[Registered Model] drop_rate:", drop)
     print("[Registered Model] ydrop:", ydrop)
@@ -329,6 +338,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
     print("[Registered Model] elasticity:", elasticity)
     print("[Registered Model] scaler:", scaler)
     print("[Registered Model] n_steps:", n_steps)
+    print("[Registered Model] transformer_mean:", transformer_mean)
 
     from functools import partial
     from updated_transformer.block import Block
@@ -343,6 +353,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         scaler=scaler,
         attn_drop=drop,
         proj_drop=drop,
+        transformer_mean=transformer_mean,  # Pass transformer
     )
     mlp_partial = partial(
         Mlp,
@@ -351,6 +362,7 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         elasticity=elasticity,
         scaler=scaler,
         drop=drop,  # use the same drop for MLP as well, or pass differently
+        transformer_mean=transformer_mean,  # Pass transformer
     )
 
     model = MyVisionTransformer(

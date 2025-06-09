@@ -342,14 +342,19 @@ def main(args):
     except Exception as e:
         print(f"Failed to resume from checkpoint: {e}")
         raise RuntimeError(f"Failed to resume from checkpoint: {e}")
+    for i,block in enumerate(model.blocks):
+        model.selected_layers[i*4] = block.attn.pruning_identity_layer
+        block.selected_layers[0] = block.attn.pruning_identity_layer
     prune_indices = select_pruning_indices(model =model,
                               data_loader = data_loader_train
                                 , device = device
                                 ,scoring_type= args.scoring_type,
                                 batches_num= args.update_batches,
                                 pruning_rate= args.pruning_rate,
-                                pruning_type=args.pruning_type)
-    print(f"Pruning indices: {prune_indices}")
+                                pruning_type=args.pruning_type,
+                                transformer = True)
+    print(f"Pruning indices: {prune_indices[0]}")
+    print(f"Pruning rate: {prune_indices[1]}")
     prune_vit_blocks(model=model,
                     prune_map=prune_indices)
 

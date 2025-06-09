@@ -42,6 +42,7 @@ class Block(nn.Module):
             mask_type: Optional[str] = 'sigmoid',
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
+            transformer_mean: bool = False,
 
 
     ) -> None:
@@ -62,6 +63,7 @@ class Block(nn.Module):
             mask_type=mask_type,
             elasticity=elasticity,
             scaler=scaler,
+            transformer_mean=transformer_mean,
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -76,6 +78,7 @@ class Block(nn.Module):
             mask_type=mask_type,
             elasticity=elasticity,
             scaler=scaler,
+            transformer_mean=transformer_mean,
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()

@@ -28,7 +28,8 @@ def select_pruning_indices(
     scoring_type: str = "Conductance",
     batches_num: int = 10,
     pruning_rate: float = 0.2,
-    pruning_type: str = "Normalization"
+    pruning_type: str = "Normalization",
+    transformer: bool = False
 ) -> Dict[int, List[int]]:
     """
     Compute per-layer importance scores (already stored in model.scores['drop_i']),
@@ -95,7 +96,8 @@ def select_pruning_indices(
                 score_mean = score_tensor.clone()
             else:
                 score_mean = score_tensor.mean(dim=0)
-
+            if transformer:
+                score_mean = score_mean.mean(dim =0)
             key = f"drop_{layer_idx}"
             if model_clone.scores[key] is None:
                 model_clone.scores[key] = score_mean.clone().detach()
@@ -111,7 +113,8 @@ def select_pruning_indices(
             raise RuntimeError(f"No scores were computed for layer {i}. Did data_loader run out of data?")
     for i in range(num_layers):
         key = f"drop_{i}"
-        print(f"Layer {i} scores: {model_clone.scores[key].mean().item():.4f} (std: {model_clone.scores[key].std().item():.4f})")
+        print(f"Layer {i} scores shape : {model_clone.scores[key].shape}")
+        #print(f"Layer {i} scores: {model_clone.scores[key].mean().item():.4f} (std: {model_clone.scores[key].std().item():.4f})")
     # -------------------------------------------------------------------------
     # 4) --- collect all layer‐wise score‐tensors, compute total # of neurons
     # -------------------------------------------------------------------------
@@ -288,17 +291,17 @@ def select_pruning_indices(
     # ----------------------------------------------------------------------------
     # 8) --- return the dictionary of indices to prune
     # ----------------------------------------------------------------------------
-    # y= 0
-    # for key, tuple_list in prune_indices.items():
-    #     x = []
-    #     for tup in tuple_list:
-    #         if y == 1:
-    #             print(tup)
-    #         if isinstance(tup, int):
-    #             x.append(tup)
-    #         elif isinstance(tup, tuple):
-    #             x.append(tup[0])
-    #     y=1
-    #     prune_indices[key] = x
+    y= 0
+    for key, tuple_list in prune_indices.items():
+        x = []
+        for tup in tuple_list:
+            if y == 1:
+                print(tup)
+            if isinstance(tup, int):
+                x.append(tup)
+            elif isinstance(tup, tuple):
+                x.append(tup[0])
+        y=1
+        prune_indices[key] = x
 
     return prune_indices

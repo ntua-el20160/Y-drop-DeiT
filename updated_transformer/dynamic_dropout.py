@@ -24,7 +24,7 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 
 class MyDropout(nn.Module):
-    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid"):
+    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid",transformer_mean = False):
         """
         p: dropout probability.
         elasticity: how quickly the dropout mask changes.
@@ -49,6 +49,7 @@ class MyDropout(nn.Module):
         self.base = False
         self.base_keep = 1 - self.p
         self.tied_layer = tied_layer  # Store the tied layer for reference.
+        self.transformer_mean = transformer_mean  # Whether to use the transformer mean for normalization.
 
         # Buffers will be lazily initialized based on the tied layer's output.
  
@@ -126,14 +127,17 @@ class MyDropout(nn.Module):
         -inverse: inverse sigmoid for fine-tuning.
         -dynamic_sigmoid: dynamic sigmoid based on the min and max of the scoring values.
         """
-
+       
         # Normalize scoring
 
         #ormalized = (scoring - scoring.mean()) / scoring.std()
         # epsilon = 1e-6
         # s_min, s_max = scoring.min(), scoring.max()
         # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
-        scoring_final = scoring
+        if self.transformer_mean:
+            scoring_final = scoring.mean(dim =0)
+        else:
+            scoring_final = scoring
         self.scoring.copy_(scoring_final)
         #Different mask types
         if self.mask_type == "sigmoid":
@@ -218,7 +222,10 @@ class MyDropout(nn.Module):
     def forward(self, input):
         
         if not self.initialized:
-            feature_shape = input.shape[1:]  # Exclude the batch dimension.
+            if self.transformer_mean:
+                feature_shape =input.shape[2:] #Exclude batch dimension and patch dimension
+            else:
+                feature_shape = input.shape[1:]  # Exclude the batch dimension.
             self.initialize_buffers(feature_shape, input.device)
 
         if not self.training:
@@ -233,6 +240,7 @@ class MyDropout(nn.Module):
             return mask * input / (self.base_keep)
         else:
             #mask = torch.empty_like(input).bernoulli_(self.previous)
+            #print("dropout_mask_shape:",self.previous.shape)
             mask = torch.empty_like(input).bernoulli_(self.previous)
             #print("Neuron amount",mask.shape)
             #print("Amount of zeroes in mask: ",torch.sum(mask == 0))

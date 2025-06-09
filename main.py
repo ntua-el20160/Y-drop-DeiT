@@ -193,6 +193,8 @@ def get_args_parser():
                         type=str, help='Scoring type for custom dropout')
     parser.add_argument('--same_batch', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
+    parser.add_argument('--transformer_mean', action='store_true', default=False,
+                        help='Enable smooth scoring for custom dropout')
     return parser
 
 
@@ -316,6 +318,7 @@ def main(args):
     elasticity=args.elasticity,
     scaler=args.scaler,
     n_steps=args.n_steps,
+    transformer_mean=args.transformer_mean,
 )
 
 
@@ -408,7 +411,7 @@ def main(args):
             patience_counter = checkpoint.get('patience_counter', 0)
             patience_counter = checkpoint.get('patience_counter', 0)
         except Exception as e:
-            print("Error loading:",e)    
+            print("Error loading:",e)  
             best_loss = float('inf')
             saved_epoch = 0
             cumulative_train_time = 0.0

@@ -254,3 +254,46 @@ def to_2d(arr):
     else:
         # Flatten all dimensions except the last one.
         return arr.reshape(-1, arr.shape[-1])
+
+def plot_progression_statistics(data_dir = '', label="layer1",save_dir = None):
+    """
+    Plot the progression of overall averages over updates.
+    This function creates a 2×1 plot:
+        • Top subplot: progression of overall average scoring.
+        • Bottom subplot: progression of overall average keep probability.
+        
+    The x-axis shows the update number, and the y-axis shows the corresponding progression value.
+    """
+    if save_dir ==  None:
+        save_dir =data_dir
+    scoring_path =os.path.join(data_dir, f"{label}_progression_scoring.npy")
+    keep_path =os.path.join(data_dir, f"{label}_progression_keep.npy")
+    progression_scoring = np.load(scoring_path)
+    progression_keep = np.load(keep_path)
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+    updates = np.arange(1, len(progression_scoring) + 1)
+    
+    # Plot progression for scoring.
+    axs[0].plot(updates, progression_scoring, marker='o', linestyle='-')
+    axs[0].set_title("Overall Scoring Sum over an Epoch Progression")
+    axs[0].set_xlabel("Update Number")
+    axs[0].set_ylabel("Scoring Sum")
+    axs[0].grid(True)
+    
+    # Plot progression for keep probability.
+    axs[1].plot(updates, progression_keep, marker='o', linestyle='-')
+    axs[1].set_title("Overall Average Dropout Rate over an Epoch Progression")
+    axs[1].set_xlabel("Update Number")
+    axs[1].set_ylabel("Average Dropout Rate")
+    axs[1].grid(True)
+    
+    plt.tight_layout()
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, f"{label}_progression.png"))
+        print(f"Progression plot saved to {os.path.join(save_dir, f'{label}_progression.png')}")
+    plt.close(fig)
+
+if __name__ == '__main__':
+    plot_progression_statistics("C:/Users/tsets/Downloads","layer1")
