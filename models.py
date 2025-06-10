@@ -92,6 +92,8 @@ class MyVisionTransformer(VisionTransformer):
    
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
         # Create a detached copy of the model for IG computation.
+        torch.cuda.empty_cache()
+
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
         model_clone.eval()  

@@ -410,6 +410,7 @@ def main(args):
             best_acc = checkpoint.get('best_acc', 0.0)
             patience_counter = checkpoint.get('patience_counter', 0)
             patience_counter = checkpoint.get('patience_counter', 0)
+            best_epoch = checkpoint.get('best_epoch', 1)
         except Exception as e:
             print("Error loading:",e)  
             best_loss = float('inf')
@@ -417,6 +418,7 @@ def main(args):
             cumulative_train_time = 0.0
             best_acc = 0.0
             patience_counter = 0
+            best_epoch =1
 
 
 
@@ -426,6 +428,8 @@ def main(args):
         cumulative_train_time = 0.0
         best_acc = 0.0
         patience_counter = 0
+        best_epoch =1
+
     
     # print("Start")
     # for drop in model.drop_list:
@@ -523,6 +527,7 @@ def main(args):
         
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
+            best_epoch = epoch + 1
         
         # print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
         #       f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
@@ -539,7 +544,8 @@ def main(args):
                 'lowest_loss': best_loss,
                 'train_time': cumulative_train_time,  # cumulative training time so far
                 'best_acc': best_acc,
-                'patience_counter': patience_counter
+                'patience_counter': patience_counter,
+                'best_epoch': best_epoch
                 }
         if args.ydrop:
             checkpoint['history'] = {}
@@ -608,7 +614,7 @@ def main(args):
 
 
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
-    print(f"Training complete. Best Test Accuracy: {best_acc:.2f}%. Total training time: {total_time_str}")
+    print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
         
 
 

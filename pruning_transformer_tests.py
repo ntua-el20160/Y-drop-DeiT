@@ -28,7 +28,7 @@ from samplers import RASampler
 import models
 import utils
 from updated_transformer.pruning_indices import select_pruning_indices
-from updated_transformer.pruning_transformer_blocks import prune_vit_blocks
+from updated_transformer.pruning_transformer_blocks import prune_model
 
 
 def get_args_parser():
@@ -353,10 +353,28 @@ def main(args):
                                 pruning_rate= args.pruning_rate,
                                 pruning_type=args.pruning_type,
                                 transformer = True)
-    print(f"Pruning indices: {prune_indices[0]}")
-    print(f"Pruning rate: {prune_indices[1]}")
-    prune_vit_blocks(model=model,
-                    prune_map=prune_indices)
+    # print(f"Pruning indices: {prune_indices[0]}")
+    # print(f"Pruning rate: {prune_indices[1]}") 
+    #print(type(prune_indices))
+    # for i in range(len(model.blocks)*4):
+    #     print(len(prune_indices[i]))
+
+    # test_stats = evaluate(data_loader_val, model, device)
+    # test_acc = test_stats.get('acc1', 0.0)
+    # test_loss = test_stats.get('loss', 0.0)
+    # print(f"Initial test accuracy: {test_acc:.2f}, Initial test loss: {test_loss:.4f}")
+    
+    print("Pruning model...")
+    prune_model(model=model,
+                    prune_indices=prune_indices)
+    # for i,block in enumerate(model.blocks):
+    #     print("qkv")
+    #     print(block.attn.qkv.weight.size(),prune_indices[i * 4 ])
+    model = model.to(device)
+    test_stats = evaluate(data_loader_val, model, device)
+    test_acc = test_stats.get('acc1', 0.0)
+    test_loss = test_stats.get('loss', 0.0)
+    print(f"Test accuracy: {test_acc:.2f}, Test loss: {test_loss:.4f}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT Training Script', parents=[get_args_parser()])

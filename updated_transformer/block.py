@@ -87,6 +87,7 @@ class Block(nn.Module):
         self.drop_list = [self.attn.attn_drop,self.attn.proj_drop,self.mlp.drop1,self.mlp.drop2]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        #print("hi")
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
