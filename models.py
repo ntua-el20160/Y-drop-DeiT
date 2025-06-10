@@ -22,7 +22,7 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 from updated_transformer.block import Block
 from updated_transformer.mlp import Mlp
 """DropPath and LayerScale may need changes"""
-
+import gc
 
 from timm.models.vision_transformer import VisionTransformer
 import torch
@@ -91,6 +91,8 @@ class MyVisionTransformer(VisionTransformer):
     #         self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
    
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
+        gc.collect()
+
         # Create a detached copy of the model for IG computation.
         torch.cuda.empty_cache()
 
@@ -157,6 +159,8 @@ class MyVisionTransformer(VisionTransformer):
             self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
 
         del model_clone
+        gc.collect()
+
         torch.cuda.empty_cache()
 
         self.train()
