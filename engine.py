@@ -49,7 +49,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
-                    output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1) -> dict:
+                    output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
+                    noisy_score = False,noisy_dropout = False,min_dropout = 0.0) -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -105,7 +106,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
                 #model.calculate_scores(next_batches,device,stats=stats)
-                model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type)
+                model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,noisy_dropout = noisy_dropout,min_dropout=min_dropout)
 
 
 

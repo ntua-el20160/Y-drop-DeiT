@@ -90,7 +90,9 @@ class MyVisionTransformer(VisionTransformer):
     #         layer_num = i%4
     #         self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
    
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
+                         scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
+                         min_dropout =0.0) -> None:
         gc.collect()
 
         # Create a detached copy of the model for IG computation.
@@ -140,7 +142,14 @@ class MyVisionTransformer(VisionTransformer):
 
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
-            drop_layer.update_dropout_masks(model_clone.scores[f'drop_{i}']/float(len(batches)), stats=stats)
+            score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+            if noisy_score:
+                #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
+                
+                noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
+
+                score = score + noise
+            drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)
 
 
         #load the update on the model from the copy

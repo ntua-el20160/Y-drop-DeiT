@@ -89,7 +89,9 @@ class CNN6_S1(nn.Module):
         x = self.fc3(x)
         return x
 
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,scoring_type = "Conductance") -> None:
+    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
+                         scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
+                         min_dropout = 0.0) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -130,16 +132,30 @@ class CNN6_S1(nn.Module):
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
                     model_clone.scores[f'drop_{i}'] = score_mean.clone()
+                    #print(f"Initialized scores for drop_{i} {score_mean.mean().item()}")
                 else:
                     # Accumulate the score_mean
                     model_clone.scores[f'drop_{i}'] += score_mean
+                    #print(f"Initialized scores for drop_{i} {score_mean.mean().item()}")
+        
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
+            #print(f"Mean for 2 batches for drop_{i} {(model_clone.scores[f'drop_{i}']/float(len(batches))).mean().item()}")
+            score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+            if noisy_score:
+                #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
+                
+                noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1
+
+                score = score + noise
+
             drop_layer.update_dropout_masks(
                 #CHANGE TO CHECK: diving by the number of batches to get the average score
-                model_clone.scores[f'drop_{i}']/float(len(batches)),
+                score,
                 #model_clone.scores[f'drop_{i}'],
-                stats=stats
+                stats=stats,
+                noisy = noisy_dropout,
+                min_dropout=min_dropout
             )
 
         #load the update on the model from the copy
@@ -245,6 +261,12 @@ def get_args_parser():
                         type=str, help='Scoring type for custom dropout')
     parser.add_argument('--same_batch', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
+    parser.add_argument('--noisy_score', action='store_true', default=False,
+                        help='Noise addition to score')
+    parser.add_argument('--noisy_dropout', action='store_true', default=False,
+                        help='Noise addition to dropout')
+    parser.add_argument('--min_dropout', type=float, default=0.0,
+                    help='Minimum allowed dropout rate')
     return parser
 
 def main(args):
@@ -455,7 +477,10 @@ def main(args):
             output_dir = output_dir,
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
-            help_par = 0
+            help_par = 0,
+            noisy_score = args.noisy_score,
+            noisy_dropout = args.noisy_dropout,
+            min_dropout = args.min_dropout
         )
 
         epoch_time = time.time() - start_time

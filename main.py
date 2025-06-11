@@ -195,6 +195,12 @@ def get_args_parser():
                         help='Enable smooth scoring for custom dropout')
     parser.add_argument('--transformer_mean', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
+    parser.add_argument('--noisy_score', action='store_true', default=False,
+                        help='Noise addition to score')
+    parser.add_argument('--noisy_dropout', action='store_true', default=False,
+                        help='Noise addition to dropout')
+    parser.add_argument('--min_dropout', type=float, default=0.0,
+                help='Minimum allowed dropout rate')
     return parser
 
 
@@ -320,6 +326,17 @@ def main(args):
     n_steps=args.n_steps,
     transformer_mean=args.transformer_mean,
 )
+    ### TO CHECK: AFTER NORM
+    # for i,block in model.blocks:
+    #     model.selected_layers[i*4 + 1] = block.norm2
+
+    # for i in range(len(model.blocks)-1):
+    #     model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
+
+
+    
+
+
 
 
     # TODO: finetuning
@@ -502,6 +519,7 @@ def main(args):
             same_batch = args.same_batch,
             help_par = 1,
             output_dir=output_dir,
+            min_dropout=args.min_dropout,
         )
 
         

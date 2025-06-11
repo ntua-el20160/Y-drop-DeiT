@@ -114,7 +114,7 @@ class MyDropout(nn.Module):
 
 
 
-    def update_dropout_masks(self, scoring, stats=True):
+    def update_dropout_masks(self, scoring, stats=True,noisy = False,min_dropout = 0.0):    
         """Update the dropout masks based on the scoring tensor.
         scoring: a tensor of shape [channels] representing the scoring values.
         stats: whether to save the scoring and dropout history.
@@ -168,7 +168,11 @@ class MyDropout(nn.Module):
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
+                 
+            if noisy:
+                noise = (torch.rand_like(raw_keep) - 0.5) * 2 * raw_keep.abs()*0.1
+                raw_keep = raw_keep +noise
+            keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
 
         elif self.mask_type == "softmax_inverse":
             # Make sure scoring is not huge in magnitude.
@@ -207,7 +211,10 @@ class MyDropout(nn.Module):
         # Step 3: Update scaling buffer and stats if needed
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:
             self.scaling = torch.full_like(keep_prob, self.base_keep)
-        
+   
+
+
+            
 
         if stats:
             self.update_aggregated_statistics(scoring, keep_prob)
