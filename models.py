@@ -92,7 +92,7 @@ class MyVisionTransformer(VisionTransformer):
    
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
-                         min_dropout =0.0) -> None:
+                         min_dropout =0.0,alt_attention_cond = False) -> None:
         gc.collect()
 
         # Create a detached copy of the model for IG computation.
@@ -143,12 +143,22 @@ class MyVisionTransformer(VisionTransformer):
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(model_clone.drop_list):
             score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+            if alt_attention_cond and (i % 4 == 0):
+                N = score.shape[0]  # Number of tokens
+                qkv = score.reshape(N, 3, model_clone.blocks[i // 4].attn.num_heads, model_clone.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
+                q, k, v = qkv.unbind(0)
+                q, k = model_clone.blocks[i // 4].attn.q_norm(q), model_clone.blocks[i // 4].attn.k_norm(k)
+                q = q * model_clone.blocks[i // 4].attn.scale
+                score = q @ k.transpose(-2, -1)
+
             if noisy_score:
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
                 
                 noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
 
                 score = score + noise
+                # Use the attention identity layer for the first layer of each block
+                
             drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)
 
 

@@ -201,6 +201,11 @@ def get_args_parser():
                         help='Noise addition to dropout')
     parser.add_argument('--min_dropout', type=float, default=0.0,
                 help='Minimum allowed dropout rate')
+    parser.add_argument('--after_norm', action='store_true', default=False,
+                help='Calculate conductance after normalization')
+    
+    parser.add_argument('--alt_attention_cond', action='store_true', default=False,
+                help='Calculate conductance after normalization')
     return parser
 
 
@@ -327,11 +332,15 @@ def main(args):
     transformer_mean=args.transformer_mean,
 )
     ### TO CHECK: AFTER NORM
-    # for i,block in model.blocks:
-    #     model.selected_layers[i*4 + 1] = block.norm2
+    if args.after_norm:
+        for i,block in enumerate(model.blocks):
+            model.selected_layers[i*4 + 1] = block.norm2
 
-    # for i in range(len(model.blocks)-1):
-    #     model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
+        for i in range(len(model.blocks)-1):
+            model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
+    if args.alt_attention_cond:
+        for i, block in enumerate(model.blocks):
+            model.selected_layers[i*4] = block.attn.qkv
 
 
     
@@ -520,6 +529,7 @@ def main(args):
             help_par = 1,
             output_dir=output_dir,
             min_dropout=args.min_dropout,
+            alt_attention_cond=args.alt_attention_cond,
         )
 
         

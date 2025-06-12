@@ -91,7 +91,7 @@ class CNN6_S1(nn.Module):
 
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
-                         min_dropout = 0.0) -> None:
+                         min_dropout = 0.0,alt_attention_cond = False) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
