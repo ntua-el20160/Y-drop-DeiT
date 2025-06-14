@@ -206,6 +206,9 @@ def get_args_parser():
     
     parser.add_argument('--alt_attention_cond', action='store_true', default=False,
                 help='Calculate conductance after normalization')
+    parser.add_argument('--rescaling_type',choices=['linear','piecewise', 'power_law'], default=None, type =str,
+                    help='Method to rescale the the limits of the dropout masks')
+    
     return parser
 
 
@@ -330,6 +333,7 @@ def main(args):
     scaler=args.scaler,
     n_steps=args.n_steps,
     transformer_mean=args.transformer_mean,
+    rescaling_type=args.rescaling_type,
 )
     ### TO CHECK: AFTER NORM
     if args.after_norm:

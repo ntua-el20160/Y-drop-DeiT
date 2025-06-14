@@ -29,7 +29,8 @@ from evaluate_gradients.MultiLayerConductance import MultiLayerConductance
 from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 
 class CNN6_S1(nn.Module):
-    def __init__(self, num_classes=10, use_custom_dropout=True, elasticity=1.0, p=0.1, n_steps=5,mask_type = 'sigmoid',scaler = 1.0):
+    def __init__(self, num_classes=10, use_custom_dropout=True, elasticity=1.0, p=0.1, n_steps=5,
+                 mask_type = 'sigmoid',scaler = 1.0,rescaling_type = None):
         
         super(CNN6_S1, self).__init__()
         self.n_steps = n_steps
@@ -56,7 +57,7 @@ class CNN6_S1(nn.Module):
         self.selected_layers = [self.fc1, self.fc2]
         if use_custom_dropout:
             self.drop_list = nn.ModuleList([
-                MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler)
+                MyDropout(elasticity=elasticity, p=p, tied_layer=layer, mask_type=mask_type, scaler=scaler,rescaling_type=rescaling_type)
                 for layer in self.selected_layers
             ])
         else:
@@ -267,6 +268,9 @@ def get_args_parser():
                         help='Noise addition to dropout')
     parser.add_argument('--min_dropout', type=float, default=0.0,
                     help='Minimum allowed dropout rate')
+    parser.add_argument('--rescaling_type',choices=['linear','piecewise', 'power_law'], default=None, type =str,
+                    help='Method to rescale the the limits of the dropout masks')
+    
     return parser
 
 def main(args):
@@ -365,7 +369,8 @@ def main(args):
 
   
     model = CNN6_S1(num_classes=num_classes, use_custom_dropout=args.ydrop,
-                elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
+                elasticity=args.elasticity, p=args.drop, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler
+                , rescaling_type = args.rescaling_type)
     model = model.to(device)
 
     

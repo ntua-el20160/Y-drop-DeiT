@@ -36,6 +36,7 @@ class Attention(nn.Module):
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
             transformer_mean: bool = False,
+            rescaling_type: Optional[str] = None,
 
     ) -> None:
         super().__init__()
@@ -57,13 +58,15 @@ class Attention(nn.Module):
 
         
         if ydrop is True:
-            self.attn_drop = MyDropout(elasticity=elasticity, p=attn_drop, tied_layer=self.attention_identity_layer, mask_type=mask_type, scaler=scaler,transformer_mean= False)
+            self.attn_drop = MyDropout(elasticity=elasticity, p=attn_drop, tied_layer=self.attention_identity_layer, mask_type=mask_type,
+                                        scaler=scaler,transformer_mean= False, rescaling_type=rescaling_type)
         else:
             self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         #print(self.proj)
         if ydrop is True:
-            self.proj_drop = MyDropout(elasticity=elasticity, p=proj_drop, tied_layer=self.proj, mask_type=mask_type, scaler=scaler,transformer_mean=transformer_mean)
+            self.proj_drop = MyDropout(elasticity=elasticity, p=proj_drop, tied_layer=self.proj, mask_type=mask_type,
+                                        scaler=scaler,transformer_mean=transformer_mean, rescaling_type=rescaling_type)
         else:
             self.proj_drop = nn.Dropout(proj_drop)
             

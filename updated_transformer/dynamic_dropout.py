@@ -21,10 +21,42 @@ from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 
 """DropPath and LayerScale may need changes"""
+def linear_compression(x, a, b):
+    μ = x.mean()
+    α = torch.min((μ - a) / μ, (b - μ) / (1 - μ))
+    return μ + α * (x - μ)
 
+def piecewise_linear(x, a, b):
+    μ = x.mean()
+    slope_lo = (μ - a) / μ
+    slope_hi = (b - μ) / (1 - μ)
+    return torch.where(
+        x <= μ,
+        a + slope_lo * x,
+        b - slope_hi * (1 - x)
+    )
+
+def find_gamma(x, a, b, tol=1e-4, max_iter=50):
+    μ = x.mean().item()
+    target = (μ - a) / (b - a)
+    lo, hi = 1e-3, 10.0
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2
+        if torch.mean(x**mid).item() > target:
+            lo = mid
+        else:
+            hi = mid
+        if abs(torch.mean(x**mid).item() - target) < tol:
+            break
+    return mid
+
+def power_law_rescale(x, a, b):
+    γ = find_gamma(x, a, b)
+    return a + (b - a) * x.pow(γ)
 
 class MyDropout(nn.Module):
-    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,mask_type = "sigmoid",transformer_mean = False):
+    def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,
+                 mask_type = "sigmoid",transformer_mean = False,rescaling_type = None):
         """
         p: dropout probability.
         elasticity: how quickly the dropout mask changes.
@@ -50,6 +82,7 @@ class MyDropout(nn.Module):
         self.base_keep = 1 - self.p
         self.tied_layer = tied_layer  # Store the tied layer for reference.
         self.transformer_mean = transformer_mean  # Whether to use the transformer mean for normalization.
+        self.rescaling_type = rescaling_type  # Type of rescaling to apply to the scoring values.
 
         # Buffers will be lazily initialized based on the tied layer's output.
  
@@ -144,14 +177,14 @@ class MyDropout(nn.Module):
             # Original approach
             scoring_final = -scoring_final
             normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
-            keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
-            keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
+            raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
+            #keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         elif self.mask_type == "sigmoid_inverse":
             normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             # Example smaller slope + random noise
-            keep_prob = torch.sigmoid(self.beta + self.scaler * normalized)
-            keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
+            raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
+            #keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
         
         
         elif self.mask_type == "softmax":
@@ -169,10 +202,8 @@ class MyDropout(nn.Module):
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
                  
-            if noisy:
-                noise = (torch.rand_like(raw_keep) - 0.5) * 2 * raw_keep.abs()*0.1
-                raw_keep = raw_keep +noise
-            keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
+
+            #keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
 
         elif self.mask_type == "softmax_inverse":
             # Make sure scoring is not huge in magnitude.
@@ -186,7 +217,7 @@ class MyDropout(nn.Module):
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
+            #keep_prob = raw_keep.clamp(min=0.3, max=1.0)
         elif self.mask_type == "softmax_absolute":
             # Make sure scoring is not huge in magnitude.
             epsilon = 1e-6
@@ -199,14 +230,28 @@ class MyDropout(nn.Module):
 
             #normalize for average dropout rate close to p
             raw_keep = probs * self.scaling.numel() * self.base_keep
-            keep_prob = raw_keep.clamp(min=0.3, max=1.0)
+            #keep_prob = raw_keep.clamp(min=0.3, max=)
 
 
         else:
             # Fallback or default
             normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
-            keep_prob = torch.sigmoid(self.beta - self.scaler * normalized)
-            keep_prob = torch.clamp(keep_prob, min=0.3, max=0.95)
+            raw_keep = torch.sigmoid(self.beta - self.scaler * normalized)
+            #keep_prob = torch.clamp(keep_prob, min=0.3, max=1.0 - min_dropout)
+        raw_keep = raw_keep.clamp(0.0, 1.0)
+        #print(self.rescaling_type)
+        if noisy:
+            noise = (torch.rand_like(raw_keep) - 0.5) * 2 * (1-raw_keep.abs())*0.2
+            raw_keep = raw_keep +noise
+
+        if self.rescaling_type == "linear":
+            keep_prob = linear_compression(raw_keep, 0.3, 1.0 - min_dropout)
+        elif self.rescaling_type == "piecewise":
+            keep_prob = piecewise_linear(raw_keep, 0.3, 1.0 - min_dropout)
+        elif self.rescaling_type == "power_law":
+            keep_prob = power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout)
+        else:
+            keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
 
         # Step 3: Update scaling buffer and stats if needed
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:

@@ -43,6 +43,7 @@ class Block(nn.Module):
             elasticity: Optional[float] = 0.01,
             scaler: Optional[float] = 1.0,
             transformer_mean: bool = False,
+            rescaling_type: Optional[str] = None,
 
 
     ) -> None:
@@ -64,6 +65,7 @@ class Block(nn.Module):
             elasticity=elasticity,
             scaler=scaler,
             transformer_mean=transformer_mean,
+            rescaling_type=rescaling_type,
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -79,6 +81,7 @@ class Block(nn.Module):
             elasticity=elasticity,
             scaler=scaler,
             transformer_mean=transformer_mean,
+            rescaling_type=rescaling_type,
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
