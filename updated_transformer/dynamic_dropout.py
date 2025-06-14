@@ -238,11 +238,12 @@ class MyDropout(nn.Module):
             normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
             raw_keep = torch.sigmoid(self.beta - self.scaler * normalized)
             #keep_prob = torch.clamp(keep_prob, min=0.3, max=1.0 - min_dropout)
-        raw_keep = raw_keep.clamp(0.0, 1.0)
-        #print(self.rescaling_type)
         if noisy:
             noise = (torch.rand_like(raw_keep) - 0.5) * 2 * (1-raw_keep.abs())*0.2
             raw_keep = raw_keep +noise
+        raw_keep = raw_keep.clamp(0.0, 1.0)
+        #print(self.rescaling_type)
+
 
         if self.rescaling_type == "linear":
             keep_prob = linear_compression(raw_keep, 0.3, 1.0 - min_dropout)
