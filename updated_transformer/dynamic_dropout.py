@@ -240,7 +240,9 @@ class MyDropout(nn.Module):
             #keep_prob = torch.clamp(keep_prob, min=0.3, max=1.0 - min_dropout)
         if noisy:
             noise = (torch.rand_like(raw_keep) - 0.5) * 2 * (1-raw_keep.abs())*0.2
-            raw_keep = raw_keep +noise
+            mask = (torch.rand_like(raw_keep) < 0.3).float()
+
+            raw_keep = raw_keep + (mask*noise)
         raw_keep = raw_keep.clamp(0.0, 1.0)
         #print(self.rescaling_type)
 
