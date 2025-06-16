@@ -367,10 +367,11 @@ def main(args):
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        ema_device = torch.device('cpu') if args.model_ema_force_cpu else device
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
-            device="cpu" if args.model_ema_force_cpu else '', ## was device = cpu
+            device=ema_device,
             resume='')
     # if args.model_ema:
     # # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
