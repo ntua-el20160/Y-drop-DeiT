@@ -93,15 +93,19 @@ class MyVisionTransformer(VisionTransformer):
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
                          min_dropout =0.0,alt_attention_cond = False) -> None:
-        gc.collect()
-
-        # Create a detached copy of the model for IG computation.
-        torch.cuda.empty_cache()
 
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
         model_clone.eval()  
-        
+
+        if scoring_type == "Conductance":
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+        elif scoring_type == "Sensitivity":
+            mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+        else:
+            print("Invalid scoring type. Using Conductance as default.")
+            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+
         # Initialize conductances for each layer
         for i, _ in enumerate(model_clone.selected_layers):
             model_clone.scores[f'drop_{i}'] = None
@@ -112,21 +116,11 @@ class MyVisionTransformer(VisionTransformer):
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
 
+
             # Get model predictions
             outputs = model_clone(x_captum)
             pred = outputs.argmax(dim=1)
-
-            #calculate conductunce for batch
-            if scoring_type == "Conductance":
-                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-            elif scoring_type == "Sensitivity":
-                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-            else:
-                print("Invalid scoring type. Using Conductance as default.")
-                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
@@ -178,8 +172,6 @@ class MyVisionTransformer(VisionTransformer):
             self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
 
         del model_clone
-        gc.collect()
-
         torch.cuda.empty_cache()
 
         self.train()
