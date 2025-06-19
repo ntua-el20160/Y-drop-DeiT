@@ -192,10 +192,12 @@ class MyDropout(nn.Module):
         
         elif self.mask_type == "softmax":
             # Make sure scoring is not huge in magnitude.
+            #print(f"Score in function {scoring_final}")
             scoring_final = -scoring_final
 
-            epsilon = 1e-6
+            epsilon = torch.finfo(scoring_final.dtype).eps
             s_min, s_max = scoring_final.min(), scoring_final.max()
+            #print("Max - Min:",s_max -s_min)
             normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
         
             flat = normalized.view(-1)
@@ -224,9 +226,9 @@ class MyDropout(nn.Module):
             #keep_prob = raw_keep.clamp(min=0.3, max=1.0)
         elif self.mask_type == "softmax_absolute":
             # Make sure scoring is not huge in magnitude.
-            epsilon = 1e-6
+            epsilon = torch.finfo(scoring_final.dtype).eps
             s_min, s_max = scoring_final.min(), scoring_final.max()
-            normalized = torch.abs(2 *self.scaler* (scoring - s_min) / (s_max - s_min + epsilon) - self.scaler)
+            normalized = torch.abs(2 *self.scaler* (scoring_final - s_min) / (s_max - s_min + epsilon) - self.scaler)
 
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)

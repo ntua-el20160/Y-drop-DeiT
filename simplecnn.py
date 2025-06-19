@@ -142,6 +142,8 @@ class CNN6_S1(nn.Module):
         #update the masks based on the scores
         for i, drop_layer in enumerate(model_clone.drop_list):
             #print(f"Mean for 2 batches for drop_{i} {(model_clone.scores[f'drop_{i}']/float(len(batches))).mean().item()}")
+            #print(f"Drop {i} before division {model_clone.scores[f'drop_{i}']}")
+            #print(float(len(batches)))
             score = model_clone.scores[f'drop_{i}'] / float(len(batches))
             if noisy_score:
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
@@ -150,7 +152,7 @@ class CNN6_S1(nn.Module):
                 mask = (torch.rand_like(score) < 0.3).float()
 
                 score = score + (mask*noise)
-
+            #print(f"Drop {i} after division {score}")
             drop_layer.update_dropout_masks(
                 #CHANGE TO CHECK: diving by the number of batches to get the average score
                 score,
