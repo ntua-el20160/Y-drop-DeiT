@@ -149,8 +149,10 @@ class MyVisionTransformer(VisionTransformer):
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
                 
                 noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
+                mask = (torch.rand_like(score) < 0.3).float()
 
-                score = score + noise
+                score = score + (mask*noise)
+
                 # Use the attention identity layer for the first layer of each block
                 
             drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)

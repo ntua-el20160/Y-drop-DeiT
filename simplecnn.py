@@ -128,7 +128,7 @@ class CNN6_S1(nn.Module):
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
-                score_mean = score if scoring_type == "Sensitivity" else score.mean(dim=0)
+                score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
 
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
@@ -146,9 +146,10 @@ class CNN6_S1(nn.Module):
             if noisy_score:
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
                 
-                noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1
+                noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
+                mask = (torch.rand_like(score) < 0.3).float()
 
-                score = score + noise
+                score = score + (mask*noise)
 
             drop_layer.update_dropout_masks(
                 #CHANGE TO CHECK: diving by the number of batches to get the average score
@@ -395,6 +396,7 @@ def main(args):
             best_acc = checkpoint['best_acc']
             history = checkpoint.get('history', {})
             best_loss = checkpoint.get('lowest_loss', float('inf'))
+            best_epoch = checkpoint.get('best_epoch', 0)
 
             if history:
                 for i, drop in enumerate(model.drop_list):
@@ -408,12 +410,14 @@ def main(args):
             best_acc = 0.0
             history = {}
             best_loss = float('inf')
+            best_epoch = 0
     else:
         start_epoch = 0
         cumulative_train_time = 0.0
         best_acc = 0.0
         history = {}
         best_loss = float('inf')
+        best_epoch = 0
     # print("Start")
     # for drop in model.drop_list:
     #     print(f"scaling: {drop.scaling}")
@@ -524,7 +528,8 @@ def main(args):
                 'train_time': cumulative_train_time,
                 'best_acc': best_acc,
                 'test_loss': test_loss,
-                'lowest_loss': best_loss,   
+                'lowest_loss': best_loss,  
+                'best_epoch': best_epoch,
             }
         if args.ydrop:
             checkpoint['history'] = {}
@@ -540,8 +545,10 @@ def main(args):
         # Save checkpoint if a new best accuracy is reached.
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
+            best_epoch = epoch +1
 
             checkpoint['best_acc'] = best_acc
+            checkpoint['best_epoch'] = best_epoch
             torch.save(checkpoint, output_dir /"best_model.pth")
      
         print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
@@ -558,13 +565,14 @@ def main(args):
             'best_acc': best_acc,
             'test_loss': test_stats.get('loss', 0),
             'best_loss': best_loss,
+            'best_epoch': best_epoch,
         }
 
         with (output_dir/ "log.txt").open("a") as f:
             f.write(json.dumps(log_stats) + "\n")
     
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
-    print(f"Training complete. Best Test Accuracy: {best_acc:.2f}%. Total training time: {total_time_str}")
+    print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
         
 
     

@@ -36,8 +36,11 @@ def piecewise_linear(x, a, b):
         b - slope_hi * (1 - x)
     )
 
-def find_gamma(x, a, b, tol=1e-4, max_iter=50):
-    μ = x.mean().item()
+def find_gamma(x, a, b,tar = None ,tol=1e-4, max_iter=50):
+    if tar == None:
+        μ = x.mean().item()
+    else:
+        μ = tar
     target = (μ - a) / (b - a)
     lo, hi = 1e-3, 10.0
     for _ in range(max_iter):
@@ -50,8 +53,8 @@ def find_gamma(x, a, b, tol=1e-4, max_iter=50):
             break
     return mid
 
-def power_law_rescale(x, a, b):
-    γ = find_gamma(x, a, b)
+def power_law_rescale(x, a, b,tar = None):
+    γ = find_gamma(x=x, a=a, b=b,tar=tar)
     return a + (b - a) * x.pow(γ)
 
 class MyDropout(nn.Module):
@@ -200,6 +203,7 @@ class MyDropout(nn.Module):
             probs = softmax_flat.view(scoring_final.shape)
 
             #normalize for average dropout rate close to p
+            #keep_prob = power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout,self.base_keep)
             raw_keep = probs * self.scaling.numel() * self.base_keep
                  
 
@@ -243,6 +247,8 @@ class MyDropout(nn.Module):
             mask = (torch.rand_like(raw_keep) < 0.3).float()
 
             raw_keep = raw_keep + (mask*noise)
+
+        #power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout)
         raw_keep = raw_keep.clamp(0.0, 1.0)
         #print(self.rescaling_type)
 
