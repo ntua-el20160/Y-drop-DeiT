@@ -92,7 +92,7 @@ class MyVisionTransformer(VisionTransformer):
    
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
-                         min_dropout =0.0,alt_attention_cond = False) -> None:
+                         min_dropout =0.0,alt_attention_cond = False,sm = True) -> None:
 
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -125,7 +125,13 @@ class MyVisionTransformer(VisionTransformer):
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
-                score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
+                #score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
+                if scoring_type == "Sensitivity":
+                    score_mean = score
+                elif sm:
+                    score_mean = score.sum(dim =0)
+                else:
+                    score_mean = score.mean(dim=0)
 
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean

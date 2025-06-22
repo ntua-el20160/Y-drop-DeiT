@@ -38,8 +38,12 @@ def minmax(x):
     ma = x.max()
     mi = x.min()
     return (x - mi) / (ma - mi)
+def minmax2(x):
+    ma = x.max()
+    mi = x.min()
+    return 2*((x - mi) / (ma - mi))-1
 y = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 print(torch.softmax(torch.tensor([1.0, 2.0, 3.0]), dim=0))
 print(torch.softmax(torch.tensor([0.1, 0.2, 0.3],),dim =0))
 print(torch.softmax(minmax(torch.tensor(y).mean(dim =0)), dim=0))
-print(torch.softmax(minmax(torch.tensor(y).sum(dim=0)), dim=0))
+print(torch.softmax(minmax2(torch.tensor(y).mean(dim =0)), dim=0))

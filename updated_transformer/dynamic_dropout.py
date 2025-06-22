@@ -199,6 +199,7 @@ class MyDropout(nn.Module):
             s_min, s_max = scoring_final.min(), scoring_final.max()
             #print("Max - Min:",s_max -s_min)
             normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
+            #print("Normalized inside:",normalized)
         
             flat = normalized.view(-1)
             softmax_flat = torch.softmax(flat, dim=0)

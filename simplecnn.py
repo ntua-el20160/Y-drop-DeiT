@@ -92,7 +92,7 @@ class CNN6_S1(nn.Module):
 
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
-                         min_dropout = 0.0,alt_attention_cond = False) -> None:
+                         min_dropout = 0.0,alt_attention_cond = False,sm = True) -> None:
         # Create a detached copy of the model for IG computation.
         model_clone = copy.deepcopy(self)
         model_clone.to(device)
@@ -128,7 +128,13 @@ class CNN6_S1(nn.Module):
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
-                score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
+                #score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
+                if scoring_type == "Sensitivity":
+                    score_mean = score
+                elif sm:
+                    score_mean = score.sum(dim =0)
+                else:
+                    score_mean = score.mean(dim=0)
 
                 if model_clone.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
@@ -145,6 +151,12 @@ class CNN6_S1(nn.Module):
             #print(f"Drop {i} before division {model_clone.scores[f'drop_{i}']}")
             #print(float(len(batches)))
             score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+            
+            # def minmax2(x):
+            #     ma = x.max()
+            #     mi = x.min()
+            #     return 2*((x - mi) / (ma - mi))-1
+            # print("Minmax before",minmax2(score))
             if noisy_score:
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
                 
@@ -491,7 +503,8 @@ def main(args):
             help_par = 0,
             noisy_score = args.noisy_score,
             noisy_dropout = args.noisy_dropout,
-            min_dropout = args.min_dropout
+            min_dropout = args.min_dropout,
+            mask_type = args.mask_type
         )
 
         epoch_time = time.time() - start_time

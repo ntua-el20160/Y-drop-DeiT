@@ -535,6 +535,7 @@ def main(args):
             output_dir=output_dir,
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
+            mask_type=args.mask_type,
         )
 
         
