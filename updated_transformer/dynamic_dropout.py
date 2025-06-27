@@ -92,7 +92,7 @@ class MyDropout(nn.Module):
         self.register_buffer("previous", torch.empty(0))
         self.register_buffer("scaling", torch.empty(0))
         self.register_buffer("scoring", torch.empty(0))
-        self.beta = torch.tensor(0.0)
+        self.register_buffer("beta", torch.tensor(0.0))
         self.initialized = False
 
         # Aggregated statistics for updating without keeping full history:
