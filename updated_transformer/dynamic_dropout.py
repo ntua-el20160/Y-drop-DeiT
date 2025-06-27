@@ -275,9 +275,9 @@ class MyDropout(nn.Module):
 
         if stats:
             self.update_aggregated_statistics(scoring, keep_prob)
-        print("1",self.scaling.device)
-        print("2",keep_prob.device)
-        print("3",scoring_final.device)
+        # print("1",self.scaling.device)
+        # print("2",keep_prob.device)
+        # print("3",scoring_final.device)
         # Momentum-like update
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
         self.previous.copy_(keep_prob)
