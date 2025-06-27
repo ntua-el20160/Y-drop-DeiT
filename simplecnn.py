@@ -94,37 +94,50 @@ class CNN6_S1(nn.Module):
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
                          min_dropout = 0.0,alt_attention_cond = False,sm = True) -> None:
         # Create a detached copy of the model for IG computation.
-        model_clone = copy.deepcopy(self)
-        model_clone.to(device)
-        model_clone.eval()  
+
+        self.eval()
+        orig_reqs = []
+        for p in self.parameters():
+            orig_reqs.append(p.requires_grad)
+            p.requires_grad_(False)
+        # Also make sure no stale weight‐grads are sitting around
+        self.zero_grad()  
         
         # Initialize conductances for each layer
         for i, _ in enumerate(self.selected_layers):
-            model_clone.scores[f'drop_{i}'] = None
+            self.scores[f'drop_{i}'] = None
+        if scoring_type == "Conductance":
+            mlc = MultiLayerConductance(self, self.selected_layers)
+        elif scoring_type == "Sensitivity":
+            mlc = MultiLayerSensitivity(self, self.selected_layers)
+        else:
+            mlc = MultiLayerConductance(self, self.selected_layers)
 
-        for batch in batches:
-            x, _ = batch  # Batch is (samples, targets)
+
+        for x, _ in batches:
+
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
 
             # Get model predictions
-            outputs = model_clone(x_captum)
+            outputs = self(x_captum)
             pred = outputs.argmax(dim=1)
-            #calculate conductunce for batch
-            # mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            # captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-            if scoring_type == "Conductance":
-                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-            elif scoring_type == "Sensitivity":
-                mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
 
+            captum_out = mlc.attribute(
+                x_captum, baselines=baseline, target=pred,
+                n_steps=self.n_steps,
+                internal_batch_size=None,
+                return_convergence_delta=False,
+                attribute_to_layer_input=False,
+                grad_kwargs={"retain_graph": False},
+            )
+            if isinstance(captum_out, list):
+                captum_attrs = [t.detach() for t in captum_out]
+            elif isinstance(captum_out, tuple):
+                captum_attrs = tuple(t.detach() for t in captum_out)
             else:
-                mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-                captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-
+                captum_attrs = [captum_out.detach()]
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
@@ -136,29 +149,22 @@ class CNN6_S1(nn.Module):
                 else:
                     score_mean = score.mean(dim=0)
 
-                if model_clone.scores[f'drop_{i}'] is None:
+                if self.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
-                    model_clone.scores[f'drop_{i}'] = score_mean.clone()
+                    self.scores[f'drop_{i}'] = score_mean.clone()
                     #print(f"Initialized scores for drop_{i} {score_mean.mean().item()}")
                 else:
                     # Accumulate the score_mean
-                    model_clone.scores[f'drop_{i}'] += score_mean
+                    self.scores[f'drop_{i}'] += score_mean
                     #print(f"Initialized scores for drop_{i} {score_mean.mean().item()}")
         
         #update the masks based on the scores
-        for i, drop_layer in enumerate(model_clone.drop_list):
-            #print(f"Mean for 2 batches for drop_{i} {(model_clone.scores[f'drop_{i}']/float(len(batches))).mean().item()}")
-            #print(f"Drop {i} before division {model_clone.scores[f'drop_{i}']}")
-            #print(float(len(batches)))
-            score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+        for i, drop_layer in enumerate(self.drop_list):
+
+            score = self.scores[f'drop_{i}'] / float(len(batches))
             
-            # def minmax2(x):
-            #     ma = x.max()
-            #     mi = x.min()
-            #     return 2*((x - mi) / (ma - mi))-1
-            # print("Minmax before",minmax2(score))
+
             if noisy_score:
-                #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
                 
                 noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
                 mask = (torch.rand_like(score) < 0.3).float()
@@ -174,24 +180,8 @@ class CNN6_S1(nn.Module):
                 min_dropout=min_dropout
             )
 
-        #load the update on the model from the copy
-        for i,_ in enumerate(model_clone.drop_list):
-            self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
-            self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
-            self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
-            self.drop_list[i].running_scoring_mean = model_clone.drop_list[i].running_scoring_mean
-            self.drop_list[i].running_dropout_mean = model_clone.drop_list[i].running_dropout_mean
-            self.drop_list[i].keep_hist = model_clone.drop_list[i].keep_hist
-            self.drop_list[i].scoring_hist = model_clone.drop_list[i].scoring_hist
-            self.drop_list[i].progression_scoring = model_clone.drop_list[i].progression_scoring
-            self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
-            self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
-            self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
-            self.drop_list[i].random_neuron_hists_scoring = model_clone.drop_list[i].random_neuron_hists_scoring
-            self.drop_list[i].random_neuron_hists_keep = model_clone.drop_list[i].random_neuron_hists_keep
-            self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
-
-        del model_clone
+        for p, req in zip(self.parameters(), orig_reqs):
+            p.requires_grad_(req)
         torch.cuda.empty_cache()
 
         self.train()

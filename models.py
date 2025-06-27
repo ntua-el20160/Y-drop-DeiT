@@ -90,38 +90,147 @@ class MyVisionTransformer(VisionTransformer):
     #         layer_num = i%4
     #         self.drop_list[i].plot_current_stats(epoch_label+ f" Block_{block_num}_layer_{layer_num}", save_dir)
    
+    # def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
+    #                      scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
+    #                      min_dropout =0.0,alt_attention_cond = False,sm = True) -> None:
+
+    #     model_clone = copy.deepcopy(self)
+    #     model_clone.to(device)
+    #     model_clone.eval()  
+
+    #     if scoring_type == "Conductance":
+    #         mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+    #     elif scoring_type == "Sensitivity":
+    #         mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+    #     else:
+    #         print("Invalid scoring type. Using Conductance as default.")
+    #         mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+
+    #     # Initialize conductances for each layer
+    #     for i, _ in enumerate(model_clone.selected_layers):
+    #         model_clone.scores[f'drop_{i}'] = None
+
+    #     for batch in batches:
+    #         x, _ = batch  # Batch is (samples, targets)
+    #         x_captum = x.detach().clone().requires_grad_()
+    #         x_captum = x_captum.to(device, non_blocking=True)
+    #         baseline = torch.zeros_like(x_captum)
+
+
+    #         # Get model predictions
+    #         outputs = model_clone(x_captum)
+    #         pred = outputs.argmax(dim=1)
+    #         captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
+
+    #         # Average out the conductance across the batch and add it
+    #         for i, score in enumerate(captum_attrs):
+    #             #score_mean = score.mean(dim=0)
+    #             #score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
+    #             if scoring_type == "Sensitivity":
+    #                 score_mean = score
+    #             elif sm:
+    #                 score_mean = score.sum(dim =0)
+    #             else:
+    #                 score_mean = score.mean(dim=0)
+
+    #             if model_clone.scores[f'drop_{i}'] is None:
+    #                 # First time: initialize with the computed score_mean
+    #                 model_clone.scores[f'drop_{i}'] = score_mean.clone()
+    #             else:
+    #                 # Accumulate the score_mean
+    #                 model_clone.scores[f'drop_{i}'] += score_mean
+
+    #     # Update the dropout masks based on the accumulated conductances
+    #     for i, drop_layer in enumerate(model_clone.drop_list):
+    #         score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+    #         if alt_attention_cond and (i % 4 == 0):
+    #             N = score.shape[0]  # Number of tokens
+    #             qkv = score.reshape(N, 3, model_clone.blocks[i // 4].attn.num_heads, model_clone.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
+    #             q, k, v = qkv.unbind(0)
+    #             q, k = model_clone.blocks[i // 4].attn.q_norm(q), model_clone.blocks[i // 4].attn.k_norm(k)
+    #             q = q * model_clone.blocks[i // 4].attn.scale
+    #             score = q @ k.transpose(-2, -1)
+
+    #         if noisy_score:
+    #             #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
+                
+    #             noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
+    #             mask = (torch.rand_like(score) < 0.3).float()
+
+    #             score = score + (mask*noise)
+
+    #             # Use the attention identity layer for the first layer of each block
+                
+    #         drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)
+
+
+    #     #load the update on the model from the copy
+    #     for i,_ in enumerate(model_clone.drop_list):
+    #         self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
+    #         self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
+    #         self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
+    #         self.drop_list[i].running_scoring_mean = model_clone.drop_list[i].running_scoring_mean
+    #         self.drop_list[i].running_dropout_mean = model_clone.drop_list[i].running_dropout_mean
+    #         self.drop_list[i].keep_hist = model_clone.drop_list[i].keep_hist
+    #         self.drop_list[i].scoring_hist = model_clone.drop_list[i].scoring_hist
+    #         self.drop_list[i].progression_scoring = model_clone.drop_list[i].progression_scoring
+    #         self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
+    #         self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
+    #         self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
+    #         self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
+
+    #     del model_clone
+    #     torch.cuda.empty_cache()
+
+    #     self.train()
     def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
                          scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
                          min_dropout =0.0,alt_attention_cond = False,sm = True) -> None:
 
-        model_clone = copy.deepcopy(self)
-        model_clone.to(device)
-        model_clone.eval()  
+        self.eval()
+        orig_reqs = []
+        for p in self.parameters():
+            orig_reqs.append(p.requires_grad)
+            p.requires_grad_(False)
+        # Also make sure no stale weight‐grads are sitting around
+        self.zero_grad()  
 
         if scoring_type == "Conductance":
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+            mlc = MultiLayerConductance(self, self.selected_layers)
         elif scoring_type == "Sensitivity":
-            mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
+            mlc = MultiLayerSensitivity(self, self.selected_layers)
         else:
             print("Invalid scoring type. Using Conductance as default.")
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
+            mlc = MultiLayerConductance(self, self.selected_layers)
 
         # Initialize conductances for each layer
-        for i, _ in enumerate(model_clone.selected_layers):
-            model_clone.scores[f'drop_{i}'] = None
+        for i, _ in enumerate(self.selected_layers):
+            self.scores[f'drop_{i}'] = None
 
-        for batch in batches:
-            x, _ = batch  # Batch is (samples, targets)
+        for x, _ in batches:
+
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
 
 
             # Get model predictions
-            outputs = model_clone(x_captum)
+            outputs = self(x_captum)
             pred = outputs.argmax(dim=1)
-            captum_attrs = mlc.attribute(x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps)
-
+            captum_out = mlc.attribute(
+                x_captum, baselines=baseline, target=pred,
+                n_steps=self.n_steps,
+                internal_batch_size=None,
+                return_convergence_delta=False,
+                attribute_to_layer_input=False,
+                grad_kwargs={"retain_graph": False},
+            )
+            if isinstance(captum_out, list):
+                captum_attrs = [t.detach() for t in captum_out]
+            elif isinstance(captum_out, tuple):
+                captum_attrs = tuple(t.detach() for t in captum_out)
+            else:
+                captum_attrs = [captum_out.detach()]
             # Average out the conductance across the batch and add it
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
@@ -133,22 +242,22 @@ class MyVisionTransformer(VisionTransformer):
                 else:
                     score_mean = score.mean(dim=0)
 
-                if model_clone.scores[f'drop_{i}'] is None:
+                if self.scores[f'drop_{i}'] is None:
                     # First time: initialize with the computed score_mean
-                    model_clone.scores[f'drop_{i}'] = score_mean.clone()
+                    self.scores[f'drop_{i}'] = score_mean.clone()
                 else:
                     # Accumulate the score_mean
-                    model_clone.scores[f'drop_{i}'] += score_mean
+                    self.scores[f'drop_{i}'] += score_mean
 
         # Update the dropout masks based on the accumulated conductances
-        for i, drop_layer in enumerate(model_clone.drop_list):
-            score = model_clone.scores[f'drop_{i}'] / float(len(batches))
+        for i, drop_layer in enumerate(self.drop_list):
+            score = self.scores[f'drop_{i}'] / float(len(batches))
             if alt_attention_cond and (i % 4 == 0):
                 N = score.shape[0]  # Number of tokens
-                qkv = score.reshape(N, 3, model_clone.blocks[i // 4].attn.num_heads, model_clone.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
+                qkv = score.reshape(N, 3, self.blocks[i // 4].attn.num_heads, self.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
                 q, k, v = qkv.unbind(0)
-                q, k = model_clone.blocks[i // 4].attn.q_norm(q), model_clone.blocks[i // 4].attn.k_norm(k)
-                q = q * model_clone.blocks[i // 4].attn.scale
+                q, k = self.blocks[i // 4].attn.q_norm(q), self.blocks[i // 4].attn.k_norm(k)
+                q = q * self.blocks[i // 4].attn.scale
                 score = q @ k.transpose(-2, -1)
 
             if noisy_score:
@@ -165,22 +274,11 @@ class MyVisionTransformer(VisionTransformer):
 
 
         #load the update on the model from the copy
-        for i,_ in enumerate(model_clone.drop_list):
-            self.drop_list[i].load_state_dict(model_clone.drop_list[i].state_dict())
-            self.drop_list[i].scaling = model_clone.drop_list[i].scaling.detach().clone()
-            self.drop_list[i].previous = model_clone.drop_list[i].previous.detach().clone()
-            self.drop_list[i].running_scoring_mean = model_clone.drop_list[i].running_scoring_mean
-            self.drop_list[i].running_dropout_mean = model_clone.drop_list[i].running_dropout_mean
-            self.drop_list[i].keep_hist = model_clone.drop_list[i].keep_hist
-            self.drop_list[i].scoring_hist = model_clone.drop_list[i].scoring_hist
-            self.drop_list[i].progression_scoring = model_clone.drop_list[i].progression_scoring
-            self.drop_list[i].progression_keep = model_clone.drop_list[i].progression_keep
-            self.drop_list[i].sum_scoring = model_clone.drop_list[i].sum_scoring
-            self.drop_list[i].sum_keep = model_clone.drop_list[i].sum_keep
-            self.drop_list[i].scoring_hist_focused = model_clone.drop_list[i].scoring_hist_focused
-
-        del model_clone
+      
+        for p, req in zip(self.parameters(), orig_reqs):
+            p.requires_grad_(req)
         torch.cuda.empty_cache()
+
 
         self.train()
 
