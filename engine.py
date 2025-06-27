@@ -83,17 +83,23 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     helper = data_loader.batch_size//32
                     next_batches = []
                     if same_batch:
-                        big_batches = [(samples.clone(), targets.clone())]
+                        bs,bt = samples, targets
                     else:
-                        big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
-                    for i in range(update_batches):
-                        b = i//helper
-                        ig = i%helper
-                        full_samples, full_targets = big_batches[b]
-                        sub_samples = full_samples[32*ig:32*(ig+1)]
-                        sub_targets = full_targets[32*ig:32*(ig+1)]
-                        next_batches.append((sub_samples.clone(), sub_targets.clone()))
-                    
+                        bs, bt = next(new_iter)
+                        #big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
+                    # for i in range(update_batches):
+                    #     b = i//helper
+                    #     ig = i%helper
+                    #     nb = min(update_batches, len(sample_chunks))
+                    sample_chunks = bs.split(32)
+                    target_chunks = bt.split(32)
+                    nb = min(update_batches, len(sample_chunks))
+                    next_batches = [(sample_chunks[i], target_chunks[i]) for i in range(nb)]
+
+                        # full_samples, full_targets = big_batches[b]
+                        # sub_samples = full_samples[32*ig:32*(ig+1)]
+                        # sub_targets = full_targets[32*ig:32*(ig+1)]
+                        # next_batches.append((sub_samples.clone(), sub_targets.clone()))
                     #next_batches = list(itertools.islice(new_iter, update_batches))
                 else:
                     next_batches = []
