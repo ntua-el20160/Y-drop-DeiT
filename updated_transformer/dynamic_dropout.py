@@ -275,7 +275,9 @@ class MyDropout(nn.Module):
 
         if stats:
             self.update_aggregated_statistics(scoring, keep_prob)
-
+        print("1",self.scaling.device)
+        print("2",keep_prob.device)
+        print("3",scoring_final.device)
         # Momentum-like update
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
         self.previous.copy_(keep_prob)
@@ -641,7 +643,7 @@ class MyDropout(nn.Module):
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
         # For lazy-initialized buffers, if they are still empty, override them with the checkpoint values.
-        for key in ['previous', 'scaling', 'scoring']:
+        for key in ['previous', 'scaling', 'scoring','beta']:
             full_key = prefix + key
             if full_key in state_dict:
                 checkpoint_val = state_dict[full_key]
