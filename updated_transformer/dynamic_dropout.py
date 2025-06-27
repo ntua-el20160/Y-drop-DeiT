@@ -92,7 +92,7 @@ class MyDropout(nn.Module):
         self.register_buffer("previous", torch.empty(0))
         self.register_buffer("scaling", torch.empty(0))
         self.register_buffer("scoring", torch.empty(0))
-        self.register_buffer("beta", torch.tensor(0.0))
+        self.beta = torch.tensor(0.0)
         self.initialized = False
 
         # Aggregated statistics for updating without keeping full history:
@@ -279,6 +279,7 @@ class MyDropout(nn.Module):
         # print("2",keep_prob.device)
         # print("3",scoring_final.device)
         # Momentum-like update
+        keep_prob.to(self.scaling.device)
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
         self.previous.copy_(keep_prob)
 
@@ -643,7 +644,7 @@ class MyDropout(nn.Module):
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
         # For lazy-initialized buffers, if they are still empty, override them with the checkpoint values.
-        for key in ['previous', 'scaling', 'scoring','beta']:
+        for key in ['previous', 'scaling', 'scoring']:
             full_key = prefix + key
             if full_key in state_dict:
                 checkpoint_val = state_dict[full_key]
