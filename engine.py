@@ -121,8 +121,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 
-                outputs = model(samples)
-                loss = criterion(outputs, targets)
+            outputs = model(samples)
+            loss = criterion(outputs, targets)
             if stats and batch_idx % 350 == 0:
                 epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data","images")
 
