@@ -24,16 +24,20 @@ from timm.utils import NativeScaler, get_state_dict, ModelEma
 
 from datasets import build_dataset, create_subdataset
 from engine import train_one_epoch, evaluate
+#from losses import DistillationLosss
 from samplers import RASampler
+#from augment import new_data_aug_generator
 import models
 import utils
-
+#import models_v2
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
     parser.add_argument('--epochs', default=300, type=int)
+    parser.add_argument('--bce-loss', action='store_true')
+    parser.add_argument('--unscale-lr', action='store_true')
 
     # Model parameters
     parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
@@ -53,6 +57,8 @@ def get_args_parser():
     parser.set_defaults(model_ema=True)
     parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
     parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
+    
+    
     parser.add_argument('--experiment_name', default='simpletransformer', type=str, help='experiment name')
 
     # Optimizer parameters
@@ -108,7 +114,16 @@ def get_args_parser():
     parser.add_argument('--repeated-aug', action='store_true')
     parser.add_argument('--no-repeated-aug', action='store_false', dest='repeated_aug')
     parser.set_defaults(repeated_aug=True)
+    
+    # parser.add_argument('--train-mode', action='store_true')
+    # parser.add_argument('--no-train-mode', action='store_false', dest='train_mode')
+    # parser.set_defaults(train_mode=True)
 
+
+    #parser.add_argument('--ThreeAugment', action='store_true') #3augment
+    
+    # parser.add_argument('--src', action='store_true') #simple random crop
+    
     # * Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
                         help='Random erase prob (default: 0.25)')
@@ -133,6 +148,20 @@ def get_args_parser():
     parser.add_argument('--mixup-mode', type=str, default='batch',
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
+# # Distillation parameters
+#     parser.add_argument('--teacher-model', default='regnety_160', type=str, metavar='MODEL',
+#                         help='Name of teacher model to train (default: "regnety_160"')
+#     parser.add_argument('--teacher-path', type=str, default='')
+#     parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
+#     parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
+#     parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
+    
+#     # * Cosub params
+#     parser.add_argument('--cosub', action='store_true') 
+    
+#     # * Finetuning params
+#     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
+#     parser.add_argument('--attn-only', action='store_true') 
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01_101/imagenet_full_size/061417/', type=str,
                         help='dataset path')
@@ -149,6 +178,8 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    #parser.add_argument('--eval-crop-ratio', default=0.875, type=float, help="Crop ratio for evaluation")
+    #parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin-mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
@@ -157,6 +188,8 @@ def get_args_parser():
     parser.set_defaults(pin_mem=True)
 
     # distributed training parameters
+    
+    parser.add_argument('--distributed', action='store_true', default=False, help='Enabling distributed training')
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
@@ -215,8 +248,10 @@ def get_args_parser():
 def main(args):
     utils.init_distributed_mode(args)
 
-    print(args)
-
+    # print(args)
+    
+    # if args.distillation_type != 'none' and args.finetune and not args.eval:
+    #     raise NotImplementedError("Finetuning with distillation not yet supported")
     # device = torch.device(args.device)
 
     # # fix the seed for reproducibility
@@ -272,7 +307,7 @@ def main(args):
     step_size = round(effective_epochs / args.update_scaling_steps)
     denom = max(1, args.update_scaling_steps - 1) 
 
-    if True:  # args.distributed:
+    if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
@@ -283,8 +318,18 @@ def main(args):
             sampler_train = torch.utils.data.DistributedSampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+        if args.dist_eval:
+            if len(dataset_val) % num_tasks != 0:
+                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
+                      'equal num of samples per-process.')
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+        else:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -293,12 +338,15 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
-
+    # if args.ThreeAugment:
+    #     data_loader_train.dataset.transform = new_data_aug_generator(args)
 
     data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, batch_size=int(1.5 * args.batch_size),
-        shuffle=False, num_workers=args.num_workers,
-        pin_memory=args.pin_mem, drop_last=False
+        dataset_val, sampler=sampler_val,
+        batch_size=int(1.5 * args.batch_size),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
     )
 
     mixup_fn = None
@@ -335,6 +383,45 @@ def main(args):
     transformer_mean=args.transformer_mean,
     rescaling_type=args.rescaling_type,
 )
+                    
+    # if args.finetune:
+    #     if args.finetune.startswith('https'):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.finetune, map_location='cpu', check_hash=True)
+    #     else:
+    #         checkpoint = torch.load(args.finetune, map_location='cpu')
+
+    #     checkpoint_model = checkpoint['model']
+    #     state_dict = model.state_dict()
+    #     for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
+    #         if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+    #             print(f"Removing key {k} from pretrained checkpoint")
+    #             del checkpoint_model[k]
+
+    #     # interpolate position embedding
+    #     pos_embed_checkpoint = checkpoint_model['pos_embed']
+    #     embedding_size = pos_embed_checkpoint.shape[-1]
+    #     num_patches = model.patch_embed.num_patches
+    #     num_extra_tokens = model.pos_embed.shape[-2] - num_patches
+    #     # height (== width) for the checkpoint position embedding
+    #     orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
+    #     # height (== width) for the new position embedding
+    #     new_size = int(num_patches ** 0.5)
+    #     # class_token and dist_token are kept unchanged
+    #     extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+    #     # only the position tokens are interpolated
+    #     pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+    #     pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+    #     pos_tokens = torch.nn.functional.interpolate(
+    #         pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+    #     pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
+    #     new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+    #     checkpoint_model['pos_embed'] = new_pos_embed
+
+    #     model.load_state_dict(checkpoint_model, strict=False)
+        
+
+
     ### TO CHECK: AFTER NORM
     if args.after_norm:
         for i,block in enumerate(model.blocks):
@@ -357,13 +444,8 @@ def main(args):
     model.to(device)
     dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     model(dummy_input)
-    # for i, block in enumerate(model.blocks):
-    #     print(f"[MyVisionTransformer] Block {i} attn_drop.p = {block.attn.attn_drop.p}")
-    #     print(f"[MyVisionTransformer] Block {i} proj_drop.p = {block.attn.proj_drop.p}")
-    # for drop in model.drop_list:
-    #     print(f"Dropout rate: {drop.p}, mask type: {drop.mask_type}, "
-    #           f"elasticity: {drop.elasticity}, scaler: {drop.scaler}")
-    # print(f"[MyVisionTransformer] Dropout rate: {model.drop_rate}")
+    
+    
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -393,7 +475,7 @@ def main(args):
 
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
-    optimizer = create_optimizer(args, model)
+    optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -407,11 +489,35 @@ def main(args):
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
+    
+    # teacher_model = None
+    # if args.distillation_type != 'none':
+    #     assert args.teacher_path, 'need to specify teacher-path when using distillation'
+    #     print(f"Creating teacher model: {args.teacher_model}")
+    #     teacher_model = create_model(
+    #         args.teacher_model,
+    #         pretrained=False,
+    #         num_classes=args.nb_classes,
+    #         global_pool='avg',
+    #     )
+    #     if args.teacher_path.startswith('https'):
+    #         checkpoint = torch.hub.load_state_dict_from_url(
+    #             args.teacher_path, map_location='cpu', check_hash=True)
+    #     else:
+    #         checkpoint = torch.load(args.teacher_path, map_location='cpu')
+    #     teacher_model.load_state_dict(checkpoint['model'])
+    #     teacher_model.to(device)
+    #     teacher_model.eval()
+    # wrap the criterion in our custom DistillationLoss, which
+    # just dispatches to the original criterion if args.distillation_type is 'none'
+    # criterion = DistillationLoss(
+    #     criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
+    # )
 
     output_dir = Path(args.output_dir)
-    simple_output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.resume:
         try:
             if args.resume.startswith('https'):
@@ -422,9 +528,11 @@ def main(args):
 
             model_without_ddp.load_state_dict(checkpoint['model'])
             model_without_ddp.to(device)
+           
             if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+                
                 history = checkpoint.get('history', {})
                 if history:
                     for i, drop in enumerate(model.drop_list):
@@ -433,14 +541,18 @@ def main(args):
                         drop.progression_scoring = drop_history.get('progression_scoring', [])
                 if args.model_ema:
                     utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+                if 'loss_scaler' in checkpoint:
+                    loss_scaler.load_state_dict(checkpoint['loss_scaler'])
             
             best_loss = checkpoint.get('lowest_loss', float('inf'))
             cumulative_train_time = checkpoint.get('train_time', 0.0)
             saved_epoch = checkpoint.get('epoch', 0)
             if saved_epoch >0:
                 saved_epoch+=1
+
+            lr_scheduler.step(saved_epoch)
+
             best_acc = checkpoint.get('best_acc', 0.0)
-            patience_counter = checkpoint.get('patience_counter', 0)
             patience_counter = checkpoint.get('patience_counter', 0)
             best_epoch = checkpoint.get('best_epoch', 1)
         except Exception as e:
@@ -452,8 +564,6 @@ def main(args):
             patience_counter = 0
             best_epoch =1
 
-
-
     else:
         best_loss = float('inf')
         saved_epoch = 0
@@ -463,19 +573,16 @@ def main(args):
         best_epoch =1
 
     
-    # print("Start")
-    # for drop in model.drop_list:
-    #     print(f"scaling: {drop.scaling}")
-    # print("Rest")
-    if args.update_scaling == 'increasing':
 
+    if args.update_scaling == 'increasing':
         update_freq = 1
     else:
         update_freq = args.update_freq
     
     effective_epochs = args.epochs - args.annealing_factor
     step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1)   
+    denom = max(1, args.update_scaling_steps - 1) 
+
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -489,6 +596,7 @@ def main(args):
     check = False
     import os
     for epoch in range(saved_epoch, args.epochs):
+
         epoch_start_time = time.time()
         stats = False
 
@@ -527,12 +635,15 @@ def main(args):
             model_ema=model_ema,
             mixup_fn=mixup_fn,
             check=check,
-            update_freq=args.update_freq,
+            update_freq=update_freq,
             update_batches=args.update_batches,
             stats = stats,
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
             help_par = 1,
+            noisy_score = args.noisy_score,
+            noisy_dropout = args.noisy_dropout,
+            update_data_loader = cached_subdataset,
             output_dir=output_dir,
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
@@ -573,6 +684,7 @@ def main(args):
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'model_ema': get_state_dict(model_ema),
+                'loss_scaler': loss_scaler.state_dict() if loss_scaler is not None else None,
                 'args': args,
                 'test_acc': test_acc,
                 'test_loss': test_loss,
@@ -607,26 +719,6 @@ def main(args):
         if args.output_dir:
             utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')
         
-        
-        
-        # if (epoch in [4, 9, 19]) and (not check):
-        #     simple_output_dir = simple_output_dir / 'models'
-        #     simple_output_dir.mkdir(parents=True, exist_ok=True)
-        #     checkpoint_path = simple_output_dir / f'base_epoch_{epoch}.pth'
-        #     utils.save_on_master({
-        #         'model': model_without_ddp.state_dict(),
-        #         'optimizer': optimizer.state_dict(),
-        #         'lr_scheduler': lr_scheduler.state_dict(),
-        #         'epoch': epoch,
-        #         'model_ema': get_state_dict(model_ema),
-        #         'args': args,
-        #         'test_acc': test_acc,
-        #         'test_loss': test_loss,
-        #         'lowest_loss': best_loss,
-        #         'train_time': cumulative_train_time,  # cumulative training time so far
-        #         'best_acc': best_acc,
-        #         'patience_counter': patience_counter
-        #     }, checkpoint_path)
 
         
         log_stats = {

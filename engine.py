@@ -15,12 +15,13 @@ import torch.nn.functional as F
 
 import torch
 import numpy as np
-
+import time	
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
-
+from updated_transformer.pruning_indices import calculate_scores,accumulated_scores_uncertainty,select_pruning_indices,expand_prune_indices
+from updated_transformer.pruning_masks import apply_linear_mask,enforce_all_masks,generate_prune_masks_transformer,generate_prune_masks_linear_layers
 import utils
-
+import json
 import itertools
 
 
@@ -80,7 +81,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             if check and (batch_idx % update_freq == 0):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
-                    helper = data_loader.batch_size//32
                     next_batches = []
                     if same_batch:
                         bs,bt = samples, targets
@@ -121,8 +121,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 
-            outputs = model(samples)
-            loss = criterion(outputs, targets)
+                outputs = model(samples)
+                loss = criterion(outputs, targets)
             if stats and batch_idx % 350 == 0:
                 epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data","images")
 
@@ -140,15 +140,18 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         
 
         optimizer.zero_grad()
-        is_second_order = False 
+
         if help_par == 1:
+            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+
             loss_scaler(
             loss,
             optimizer,
             clip_grad=max_norm,
             parameters=model.parameters(),
             create_graph=is_second_order
-        )
+            )
+            torch.cuda.synchronize()
         else:
             loss.backward()
             optimizer.step()
@@ -198,3 +201,164 @@ def evaluate(data_loader, model, device):
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+def prune_and_train(model: torch.nn.Module, criterion: torch.nn.Module,
+                    data_loader: Iterable,data_loader_val :Iterable, optimizer: torch.optim.Optimizer,
+                    device: torch.device, epochs: int, loss_scaler, max_norm: float = 0,lr_scheduler=None,
+                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
+                    update_freq:int=1,update_batches:int =5, update_data_loader= None,
+                    output_dir: str = None,scoring_type:str ="Conductance",normalization:bool = True,transformer:bool = False,
+                    uncertainty:bool = False,w_avg_rate : float = 0.05,pruning_rate: float = 0.2, 
+                    pruning_type: str = "normalization",next_layer:bool = False,help_par:int =1,) -> dict:
+   
+    # TODO fix this for finetuning
+    prune_indices = None
+    prune_masks = None
+    model.use_normal_dropout()
+    cumulative_train_time = 0.0
+
+    for epoch in range(epochs):
+        epoch_start_time = time.time()
+        acc_scores = None
+        acc_means = None
+        acc_uncertainty = None
+
+        model.train()
+        criterion.train()
+        metric_logger = utils.MetricLogger(delimiter="  ")
+        metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+        header = 'Epoch: [{}]'.format(epoch)
+        print_freq = 2
+
+        # Wrap one of them with the metric logger for training.
+        logged_iter = metric_logger.log_every(data_loader, print_freq, header)
+
+        for batch_idx, (samples, targets) in enumerate(logged_iter):
+            samples = samples.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
+            #print('batch_idx:', batch_idx)
+            with torch.amp.autocast('cuda'):
+                if (batch_idx % update_freq == 0):
+                    # Get the next update_batches batches.
+                    if update_data_loader == None:
+                        bs,bt = samples, targets
+                        sample_chunks = bs.split(32)
+                        target_chunks = bt.split(32)
+                        nb = min(update_batches, len(sample_chunks))
+                        next_batches = [(sample_chunks[i], target_chunks[i]) for i in range(nb)]
+
+                    else:
+                        next_batches = []
+                        for _ in range(update_batches):
+                            # Get a random batch from the preloaded cached_subdataset.
+                            sub_samples, sub_targets = get_random_batch(update_data_loader, batch_size=32)  # Use desired sub batch size (e.g. 32)
+                            # Move the subbatch to device.
+                            sub_samples = sub_samples.to(device, non_blocking=True)
+                            sub_targets = sub_targets.to(device, non_blocking=True)
+                            next_batches.append((sub_samples, sub_targets))
+        
+                new_scores,new_means = calculate_scores(model,next_batches,device,scoring_type=scoring_type,transformer=transformer,
+                                                        normalization= normalization,sm = True)
+                if acc_means is None:
+                    acc_means = new_means
+                else:
+                    for i,mean in enumerate(new_means):
+                        acc_means [i] += mean
+
+                acc_scores, acc_uncertainty = accumulated_scores_uncertainty(acc_scores,new_scores,w_avg_rate,uncertainty,acc_uncertainty)
+                
+                outputs = model(samples)
+                loss = criterion(outputs, targets)
+               
+
+
+            loss_value = loss.item()
+
+            if not math.isfinite(loss_value):
+                print("Loss is {}, stopping training".format(loss_value))
+                sys.exit(1)
+            
+
+            optimizer.zero_grad()
+            is_second_order = False 
+            if help_par == 1:
+                is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+                loss_scaler(
+                loss,
+                optimizer,
+                clip_grad=max_norm,
+                parameters=model.parameters(),
+                create_graph=is_second_order
+                )
+                torch.cuda.synchronize()
+
+            else:
+                loss.backward()
+                optimizer.step()
+                torch.cuda.synchronize()
+            enforce_all_masks(model)
+
+            if model_ema is not None:
+                model_ema.update(model)
+
+            metric_logger.update(loss=loss_value)
+            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        # gather the stats from all processes
+        acc_means = [mean / len(data_loader) for mean in acc_means]
+        if uncertainty:
+            for i, uncert in acc_uncertainty.items():
+                acc_scores[i] = acc_scores[i] * uncert
+        if lr_scheduler is not None:
+            lr_scheduler.step(epoch)
+
+        epoch_time = time.time() - epoch_start_time
+        cumulative_train_time += epoch_time
+
+        test_stats = evaluate(data_loader_val, model, device)
+        print(f"Before pruning: Accuracy of the network on the  test images: {test_stats['acc1']:.1f}%")
+        log_stats = {
+            'epoch': epoch,
+            'before_pruning': "True",
+            'train_loss': metric_logger.loss.global_avg,
+            'test_acc': test_stats.get('acc1', 0),
+            'time': cumulative_train_time,
+            'test_loss': test_stats.get('loss', 0),
+        }
+        if output_dir :
+            with (output_dir / "log.txt").open("a") as f:
+                f.write(json.dumps(log_stats) + "\n")
+        prune_indices = select_pruning_indices(acc_scores,pruning_rate,pruning_type,prune_indices,acc_means)
+        exp_prune_indices = expand_prune_indices(prune_indices,acc_scores)
+        flat_list = [ prune_indices[i] for i in range(len(model.selected_layers)) ]
+
+        if transformer:
+            prune_masks = generate_prune_masks_transformer(model,flat_list,next_layer=next_layer)
+        else:
+            prune_masks = generate_prune_masks_linear_layers(model,flat_list,next_layer=next_layer)
+        for layer, (wm, bm) in zip(model.selected_layers, prune_masks):
+            apply_linear_mask(layer, wm, bm)
+
+        
+        test_stats = evaluate(data_loader_val, model, device)
+        print(f"Before pruning: Accuracy of the network on the  test images: {test_stats['acc1']:.1f}%")
+        log_stats = {
+            'epoch': epoch,
+            'before_pruning': "False",
+            'train_loss': metric_logger.loss.global_avg,
+            'test_acc': test_stats.get('acc1', 0),
+            'time': cumulative_train_time,
+            'test_loss': test_stats.get('loss', 0),
+        }
+        if output_dir :
+            with (output_dir / "log.txt").open("a") as f:
+                f.write(json.dumps(log_stats) + "\n")
+
+        metric_logger.synchronize_between_processes()
+        print("Averaged stats:", metric_logger)
+
+
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+

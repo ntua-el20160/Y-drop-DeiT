@@ -23,12 +23,12 @@ from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
 from datasets import build_dataset, create_subdataset
-from engine import train_one_epoch, evaluate
+from engine import train_one_epoch, evaluate, prune_and_train
 from samplers import RASampler
 import models
 import utils
-from updated_transformer.pruning_indices import select_pruning_indices
-from updated_transformer.pruning_transformer_blocks import prune_model
+from simplecnn import CNN6_S1
+
 
 
 def get_args_parser():
@@ -163,53 +163,38 @@ def get_args_parser():
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
     # --- Custom Dropout Hyperparameters ---
-    parser.add_argument('--ydrop', action='store_true', default=True,
-                    help='Enable Y-Drop (MyDropout) by default')
-    parser.add_argument('--no-ydrop', dest='ydrop', action='store_false',
-                    help='Disable Y-Drop (MyDropout)')
-
     parser.add_argument('--elasticity', type=float, default=0.01,
                         help='Elasticity factor for custom dropout')
+    parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
+    parser.add_argument('--mask_type', default='sigmoid', type=str, help='Type of mask for dropout')
+    
 
-    parser.add_argument('--annealing_factor', type=float, default=5,
-                        help='Annealing factor for custom dropout')
+
+    parser.add_argument('--w_avg_rate', type=float, default=0.01,
+                        help='Elasticity factor for custom dropout')
+
     parser.add_argument('--n_steps',type=int,default = 5,
                          help ='intermediate steps for conductance calculation')
     parser.add_argument('--update_batches',type=int,default = 1,
                          help ='intermediate steps for conductance calculation')
-    parser.add_argument('--update_freq',type=int,default = 1,
-                            help ='intermediate steps for conductance calculation')
-    parser.add_argument('--early_stopping_patience', type=int, default=10,
-                        help='Number of epochs with no improvement in eval loss before early stopping')
+
     parser.add_argument('--plot_freq', default=5, type=int, help='plot frequency')
-    parser.add_argument('--scaler', default=1.0, type=float, help='Loss scaler for mixed precision training')
-    parser.add_argument('--mask_type', default='sigmoid', type=str, help='Type of mask for dropout')
     
     parser.add_argument('--sub_dataset', default ='none',choices=['none','stratified', 'random'] ,type=str, help='Sub dataset to use for training')
     parser.add_argument('--sub_factor', default=10, type=int, help='Sub dataset factor')
-    parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
-                        help='Scale update frequency  for custom dropout')
-    parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
+  
     parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity'], default='Conductance',
                         type=str, help='Scoring type for custom dropout')
-    parser.add_argument('--same_batch', action='store_true', default=False,
-                        help='Enable smooth scoring for custom dropout')
     parser.add_argument('--pruning_type',choices=['normalization','quota', 'quotweighted','quotaweighted','hybrid'], default='normalization', type =str,
                         help='how to prune the model')
     parser.add_argument('--pruning_rate', type=float, default=0.2, help='Pruning rate for custom dropout')  
+    parser.add_argument('--uncertainty', action='store_true', default=False, help='Use uncertainty in pruning')
+    parser.add_argument('--next_layer', action='store_true', default=False, help='Prune next layer as well')
+    parser.add_argument('--normalization', action='store_true', default=False, help='Use ydrop in pruning')
     return parser
 
 def main(args):
     utils.init_distributed_mode(args)
-
-
-    # device = torch.device(args.device)
-
-    # # fix the seed for reproducibility
-    # seed = args.seed + utils.get_rank()
-    # torch.manual_seed(seed)
-    # np.random.seed(seed)
-    # # random.seed(seed)
 
     # cudnn.benchmark = True
     seed = args.seed
@@ -235,7 +220,24 @@ def main(args):
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
     
-    if True:  # args.distributed:
+    def preload_subdataset(subdataset):
+        """
+        Given a small subdataset (a torch.utils.data.Subset),
+        load all (data, target) pairs into memory as a list.
+        """
+        cached = [subdataset[i] for i in range(len(subdataset))]
+        return cached
+    
+    if args.sub_dataset == 'stratified':
+        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    elif args.sub_dataset == 'random':
+        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
+        cached_subdataset = preload_subdataset(sub_dataset)
+    else:
+        cached_subdataset = None
+
+    if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         if args.repeated_aug:
@@ -246,8 +248,18 @@ def main(args):
             sampler_train = torch.utils.data.DistributedSampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
             )
+        if args.dist_eval:
+            if len(dataset_val) % num_tasks != 0:
+                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
+                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
+                      'equal num of samples per-process.')
+            sampler_val = torch.utils.data.DistributedSampler(
+                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+        else:
+            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -256,60 +268,90 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
-
+    # if args.ThreeAugment:
+    #     data_loader_train.dataset.transform = new_data_aug_generator(args)
 
     data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, batch_size=int(1.5 * args.batch_size),
-        shuffle=False, num_workers=args.num_workers,
-        pin_memory=args.pin_mem, drop_last=False
+        dataset_val, sampler=sampler_val,
+        batch_size=int(1.5 * args.batch_size),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
     )
+    mixup_fn = None
+    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if mixup_active and args.model != 'simplecnn':
+        mixup_fn = Mixup(
+            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
+            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
+            label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-    model = create_model(
-    args.model,
-    pretrained=False,
-    num_classes=args.nb_classes,
-    drop_rate=args.drop_rate,   # changed from --drop
-    drop_path_rate=args.drop_path,
-    drop_block_rate=args.drop_block,
-    # pass our extra custom keys. You can add them here:
-    ydrop=args.ydrop,
-    mask_type=args.mask_type,
-    elasticity=args.elasticity,
-    scaler=args.scaler,
-    n_steps=args.n_steps,
-    )
+    if args.model == 'simplecnn':
+         model = CNN6_S1(num_classes=args.nb_classes, use_custom_dropout=True,
+                p=args.drop_rate, n_steps=args.n_steps,mask_type = args.mask_type,scaler = args.scaler)
+    else:
+        model = create_model(
+        args.model,
+        pretrained=False,
+        num_classes=args.nb_classes,
+        drop_rate=args.drop_rate,   # changed from --drop
+        drop_path_rate=args.drop_path,
+        drop_block_rate=args.drop_block,
+        # pass our extra custom keys. You can add them here:
+        ydrop=True,
+        mask_type=args.mask_type,
+        elasticity=args.elasticity,
+        scaler=args.scaler,
+        n_steps=args.n_steps,
+        )
+    
     model.to(device)
     dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     model(dummy_input)
     model_ema = None
-    if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = ModelEma(
+
+    if args.model!= 'simplecnn':
+        model_ema = None
+        if args.model_ema:
+            # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+            ema_device = torch.device('cpu') if args.model_ema_force_cpu else device
+            model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
-            device='cpu' if args.model_ema_force_cpu else '',
+            device=ema_device,
             resume='')
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
-    args.lr = linear_scaled_lr
+        model_without_ddp = model
+        if args.distributed:
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model_without_ddp = model.module
+        
+    model = model_without_ddp
     optimizer = create_optimizer(args, model)
     loss_scaler = NativeScaler()
     
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    if args.model != 'simplecnn':
+        linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
+        args.lr = linear_scaled_lr
+        lr_scheduler, _ = create_scheduler(args, optimizer)
+    else:
+        lr_scheduler = None
 
-    if args.mixup > 0.:
+
+ 
+
+
+    if args.model == 'simplecnn':
+        criterion = torch.nn.CrossEntropyLoss()
+    elif args.mixup > 0.:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
+    output_dir = Path(args.output_dir)
+    output_dir = output_dir / args.experiment_name
+    output_dir.mkdir(parents=True, exist_ok=True)
     try:
         print(f"Resuming from checkpoint: {args.resume}")
 
@@ -318,63 +360,68 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        if args.model == 'simplecnn':
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            model.load_state_dict(checkpoint['model'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            history = checkpoint.get('history', {})
-            if history:
-                for i, drop in enumerate(model.drop_list):
-                    drop_history = history.get(f'drop{i}', {})
-                    drop.progression_keep = drop_history.get('progression_keep', [])
-                    drop.progression_scoring = drop_history.get('progression_scoring', [])
             if args.model_ema:
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+            if 'loss_scaler' in checkpoint:
+                    loss_scaler.load_state_dict(checkpoint['loss_scaler'])
+        
+ 
+        history = checkpoint.get('history', {})
+        if history:
+            for i, drop in enumerate(model.drop_list):
+                drop_history = history.get(f'drop{i}', {})
+                drop.progression_keep = drop_history.get('progression_keep', [])
+                drop.progression_scoring = drop_history.get('progression_scoring', [])
         
         best_loss = checkpoint.get('lowest_loss', float('inf'))
-        cumulative_train_time = checkpoint.get('train_time', 0.0)
-        saved_epoch = checkpoint.get('epoch', 0)
-        if saved_epoch >0:
-            saved_epoch+=1
+        #cumulative_train_time = checkpoint.get('train_time', 0.0)
         best_acc = checkpoint.get('best_acc', 0.0)
-        patience_counter = checkpoint.get('patience_counter', 0)
     except Exception as e:
         print(f"Failed to resume from checkpoint: {e}")
         raise RuntimeError(f"Failed to resume from checkpoint: {e}")
-    for i,block in enumerate(model.blocks):
-        model.selected_layers[i*4] = block.attn.pruning_identity_layer
-        block.selected_layers[0] = block.attn.pruning_identity_layer
-    prune_indices = select_pruning_indices(model =model,
-                              data_loader = data_loader_train
-                                , device = device
-                                ,scoring_type= args.scoring_type,
-                                batches_num= args.update_batches,
-                                pruning_rate= args.pruning_rate,
-                                pruning_type=args.pruning_type,
-                                transformer = True)
-    # print(f"Pruning indices: {prune_indices[0]}")
-    # print(f"Pruning rate: {prune_indices[1]}") 
-    #print(type(prune_indices))
-    # for i in range(len(model.blocks)*4):
-    #     print(len(prune_indices[i]))
-
-    # test_stats = evaluate(data_loader_val, model, device)
-    # test_acc = test_stats.get('acc1', 0.0)
-    # test_loss = test_stats.get('loss', 0.0)
-    # print(f"Initial test accuracy: {test_acc:.2f}, Initial test loss: {test_loss:.4f}")
     
-    print("Pruning model...")
-    prune_model(model=model,
-                    prune_indices=prune_indices)
-    # for i,block in enumerate(model.blocks):
-    #     print("qkv")
-    #     print(block.attn.qkv.weight.size(),prune_indices[i * 4 ])
-    model = model.to(device)
-    test_stats = evaluate(data_loader_val, model, device)
-    test_acc = test_stats.get('acc1', 0.0)
-    test_loss = test_stats.get('loss', 0.0)
-    print(f"Test accuracy: {test_acc:.2f}, Test loss: {test_loss:.4f}")
+    if args.model != 'simplecnn':
+        for i,block in enumerate(model.blocks):
+            model.selected_layers[i*4] = block.attn.qkv
+            block.selected_layers[0] = block.attn.qkv
+    print("Best accuracy so far:", best_acc)
+    print("Best loss so far:", best_loss)
+    prune_and_train(
+        model = model,
+        criterion= criterion,
+        data_loader = data_loader_train,
+        data_loader_val = data_loader_val,
+        epochs = args.epochs,
+        optimizer = optimizer,
+        device = device,
+        loss_scaler = loss_scaler,
+        max_norm = args.clip_grad if args.model != 'simplecnn' else None,
+        lr_scheduler = lr_scheduler,
+        model_ema = model_ema if args.model!= 'simplecnn' else None,
+        mixup_fn = mixup_fn,
+        update_freq =1,
+        update_batches= args.update_batches,
+        update_data_loader = cached_subdataset,
+        output_dir = output_dir,
+        scoring_type= args.scoring_type,
+        pruning_type= args.pruning_type,
+        pruning_rate = args.pruning_rate,
+        uncertainty = args.uncertainty,
+        normalization= args.normalization,
+        next_layer = args.next_layer,
+        w_avg_rate= args.w_avg_rate,
+        help_par =0 if args.model == 'simplecnn' else 1,
+
+
+    )
+    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT Training Script', parents=[get_args_parser()])

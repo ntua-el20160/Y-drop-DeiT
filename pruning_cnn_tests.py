@@ -28,8 +28,7 @@ from captum.attr import LayerConductance
 from evaluate_gradients.MultiLayerConductance import MultiLayerConductance
 from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
 from simplecnn import CNN6_S1
-from updated_transformer.pruning_indices import select_pruning_indices
-from updated_transformer.pruning import prune_selected_layers
+
 
 
 def get_args_parser():

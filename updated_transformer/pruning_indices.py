@@ -20,16 +20,132 @@ from timm.layers import PatchEmbed, use_fused_attn, DropPath, trunc_normal_
 
 from updated_transformer.block import Block
 from updated_transformer.mlp import Mlp
+def calculate_scores(
+        model: torch.nn.Module,
+        batches: Iterable,
+        device: torch.device,
+        scoring_type: str = "Conductance",
+        transformer: bool = False,
+        normalization: bool = True,
+        sm = True) -> Dict[int, torch.Tensor]:
+    # 1) --- ensure model is in eval mode and gradients are disabled
+    torch.cuda.empty_cache()
+    model.eval()
+    # 2) --- save original requires_grad settings
+    orig_reqs = []
+    for p in model.parameters():
+        orig_reqs.append(p.requires_grad)
+        p.requires_grad_(False)
+    model.zero_grad()
+    new_scores = {}
 
+    # 3) --- select scoring type for the layers
+    if scoring_type == "Conductance":
+        mlc = MultiLayerConductance(model, model.selected_layers)
+    elif scoring_type == "Sensitivity":
+        mlc = MultiLayerSensitivity(model, model.selected_layers)
+    else:
+        print("Invalid scoring type. Using Conductance as default.")
+        mlc = MultiLayerConductance(model, model.selected_layers)
+
+    # 4) --- iterate over batches
+    for x, _ in batches:
+            # 5) --- ensure x is on the correct device and requires_grad
+            x_captum = x.detach().clone().requires_grad_()
+            x_captum = x_captum.to(device, non_blocking=True)
+            baseline = torch.zeros_like(x_captum)
+            # 6) --- forward pass and predict labels
+            outputs = model(x_captum)
+            pred = outputs.argmax(dim=1)
+            # 7) --- compute captum attributes
+            captum_out = mlc.attribute(
+                x_captum, baselines=baseline, target=pred,
+                n_steps=model.n_steps,
+                internal_batch_size=None,
+                return_convergence_delta=False,
+                attribute_to_layer_input=False,
+                grad_kwargs={"retain_graph": False},
+            )
+            # 8) --- process captum output
+            if isinstance(captum_out, list):
+                captum_attrs = [t.detach() for t in captum_out]
+            elif isinstance(captum_out, tuple):
+                captum_attrs = tuple(t.detach() for t in captum_out)
+            else:
+                captum_attrs = [captum_out.detach()]  
+            # 9) --- accumulate scores
+            for i, score in enumerate(captum_attrs):
+                #Sensetivity no batch dimension
+                if scoring_type == "Sensitivity":
+                    score_mean = score
+                #sum
+                elif sm:
+                    score_mean = score.sum(dim =0)
+                else:
+                    score_mean = score.mean(dim=0)
+                if transformer:
+                    score_mean = score_mean.sum(dim =0)
+
+                if i not in new_scores:
+                    # First time: initialize with the computed score_mean
+                    new_scores[i] = score_mean.clone()
+                else:
+                    # Accumulate the score_mean
+                    new_scores[i] += score_mean
+    # 10) compute means for each layer
+    num_batches = len(list(batches))
+    for i in new_scores:
+        new_scores[i] /= num_batches
+
+    means = [s.mean() for s in new_scores.values() if s is not None]
+    
+    # 11) --- normalize scores if required
+    if normalization:
+        for i in range(len(new_scores)):
+            if new_scores[i] is not None:
+                new_scores[i] = (new_scores[i] - new_scores[i].mean()) / new_scores[i].std()
+    
+    # 12) --- restore original requires_grad settings
+    for p, req in zip(model.parameters(), orig_reqs):
+            p.requires_grad_(req)
+    torch.cuda.empty_cache()
+
+
+    model.train()
+    return new_scores,means
+
+def accumulated_scores_uncertainty(
+        acc_scores: Dict[int, torch.Tensor] = None,
+        new_scores: Dict[int, torch.Tensor] = None,
+        w_avg_rate : float = 0.05,
+        uncertainty: bool = False,
+        acc_uncertainties: Dict[int, torch.Tensor] = None,):
+    
+    if acc_scores is None:
+        acc_scores = { i: s.clone() for i,s in new_scores.items() }
+        if uncertainty:
+            acc_uncertainties = {i: torch.zeros_like(new_scores[i]) for i in new_scores.keys()}
+    else:
+        for i,score in acc_scores.items():
+            acc_scores[i] = score*(1-w_avg_rate) + new_scores[i] * w_avg_rate
+            if uncertainty:
+                new_unc =  torch.abs(acc_scores[i]- new_scores[i])  ## maybe divide by something to make it a rate
+                acc_uncertainties[i] = acc_uncertainties[i]*(1-w_avg_rate) + new_unc * w_avg_rate
+    return acc_scores, acc_uncertainties if uncertainty else None
+
+
+
+
+
+
+
+                     
 def select_pruning_indices(
-    model: torch.nn.Module,
-    data_loader: Iterable,
-    device: torch.device,
-    scoring_type: str = "Conductance",
-    batches_num: int = 10,
+    scores: Dict[int, torch.Tensor],
     pruning_rate: float = 0.2,
-    pruning_type: str = "Normalization",
-    transformer: bool = False
+    pruning_type: str = "normalization",
+    prune_indices: Optional[Dict[int, List[int]]] = None,
+    means: Optional[List[float]] = None
 ) -> Dict[int, List[int]]:
     """
     Compute per-layer importance scores (already stored in model.scores['drop_i']),
@@ -42,117 +158,69 @@ def select_pruning_indices(
     Returns:
         prune_indices: a dict mapping each layer‐index `i` to a list of neuron‐indices to remove.
     """   
-    torch.cuda.empty_cache()
-    model_clone = copy.deepcopy(model)
-    model_clone.to(device)
-    model_clone.eval()  
-    #model.eval()  
-    num_layers = len(model_clone.selected_layers)
-    # Initialize conductances for each layer
-    for i in range(num_layers):
-        model_clone.scores[f"drop_{i}"] = None
-    plot_freq = 10
-    new_iter = iter(data_loader)
-    for b in range(batches_num):
-        try:
-            batch = next(new_iter)
-        except StopIteration:
-            break
-        if b % plot_freq == 0:
-            print(f"Processing batch {b + 1}/{batches_num}...")
-        x, _ = batch
-        x_captum = x.detach().clone().requires_grad_().to(device, non_blocking=True)
-        baseline = torch.zeros_like(x_captum)
 
-        #forward + predict labels
-        outputs = model_clone(x_captum)
-        pred = outputs.argmax(dim=1)
+    num_layers = len(scores)
 
-   
-         # choose between Conductance / Sensitivity
-        if scoring_type == "Conductance":
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
-            )
-        elif scoring_type == "Sensitivity":
-            mlc = MultiLayerSensitivity(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
-            )
-        else:
-            # fallback to Conductance
-            mlc = MultiLayerConductance(model_clone, model_clone.selected_layers)
-            captum_attrs = mlc.attribute(
-                x_captum, baselines=baseline, target=pred, n_steps=model_clone.n_steps
-            )
-
-        # Average out the conductance across the batch and add it
-        # captum_attrs is a list (length num_layers) of tensors shaped [batch_size, #neurons_in_that_layer].
-        # We average them over the batch dimension before accumulating.
-        for layer_idx, score_tensor in enumerate(captum_attrs):
-            # if using Conductance, average across batch; if using Sensitivity, `score_tensor` is already [#neurons]
-            if scoring_type == "Sensitivity":
-                score_mean = score_tensor.clone()
-            else:
-                score_mean = score_tensor.mean(dim=0)
-            if transformer:
-                score_mean = score_mean.mean(dim =0)
-            key = f"drop_{layer_idx}"
-            if model_clone.scores[key] is None:
-                model_clone.scores[key] = score_mean.clone().detach()
-            else:
-                model_clone.scores[key] += score_mean.detach()
-           # 3) --- average the accumulated scores over `batches_num`
-# -------------------------------------------------------------------------
-    for i in range(num_layers):
-        key = f"drop_{i}"
-        if model_clone.scores[key] is not None:
-            model_clone.scores[key] = model_clone.scores[key] / float(batches_num)
-        else:
-            raise RuntimeError(f"No scores were computed for layer {i}. Did data_loader run out of data?")
-    for i in range(num_layers):
-        key = f"drop_{i}"
-        print(f"Layer {i} scores shape : {model_clone.scores[key].shape}")
-        #print(f"Layer {i} scores: {model_clone.scores[key].mean().item():.4f} (std: {model_clone.scores[key].std().item():.4f})")
-    # -------------------------------------------------------------------------
-    # 4) --- collect all layer‐wise score‐tensors, compute total # of neurons
-    # -------------------------------------------------------------------------
-    torch.cuda.empty_cache()
+    # 1-initialize or normalize incoming prune_indices
+    if prune_indices is None:
+        prune_indices = {i: [] for i in range(num_layers)}
+    else:
+        # make sure every layer has a list, even if empty
+        for i in range(num_layers):
+            prune_indices.setdefault(i, [])    
+    
+    existing_flat = {
+        i: set(prune_indices[i])
+        for i in range(num_layers)
+    }
 
     layer_scores: List[torch.Tensor] = []
     layer_sizes: List[int] = []
-    for i in range(num_layers):
-        scores_i = model_clone.scores[f"drop_{i}"]  # shape: [N_i]
-        # flatten to compute mean/std and rank
+    # 2) --- collect scores for each layer flattened
+    for i,score in scores.items():
 
-        flat_scores = scores_i.view(-1)
-        layer_scores.append(scores_i)
+        flat_scores = score.view(-1)
+        layer_scores.append(flat_scores)
         layer_sizes.append(flat_scores.numel())
-    del model_clone
-    torch.cuda.empty_cache()
+    
+    # 3) --- calculate total number of neurons to prune
     total_neurons = sum(layer_sizes)
     N_remove = math.ceil(pruning_rate * total_neurons)
 
-    prune_indices: Dict[int, List[int]] = {i: [] for i in range(num_layers)}
-
+    # 4) --- Normalization: compute z-scores for each layer
     if pruning_type.lower() == "normalization":
         candidates = []
+        # 4.a) Compute z-scores for each layer  
         for i, scores in enumerate(layer_scores):
             mi = scores.mean()
             sig = scores.std(unbiased=False) + 1e-8  # avoid divide‐by‐zero
-            z_scores = (scores - mi) / sig
-            for neuron_idx in range(z_scores.size(0)):
-                candidates.append((z_scores[neuron_idx].item(), i, neuron_idx))
-        candidates.sort(key=lambda x: x[0])
-        to_prune = candidates[:N_remove]
-        for (_, layer_i, flat_j) in to_prune:
-            shape = layer_scores[layer_i].shape
-            idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-            prune_indices[layer_i].append(idx_multi)
+            z = (scores - mi) / sig
+           
+            # 4.b) Collect candidates for pruning not already in prune_indices
+            for idx in range(z.size(0)):
+                if idx in existing_flat[i]:
+                    continue
+                candidates.append((z[idx].item(), i, idx))
 
+        # 4.c) Sort candidates by z-score (ascending) → lowest z-score = least important
+        candidates.sort(key=lambda x: x[0])
+        
+        # 4.d) Select bottom N_remove candidates
+        picks = candidates[:N_remove]
+        
+    
+        for _, layer_i, flat_j in picks:
+            prune_indices[layer_i].append(flat_j)
+        # 4.e) Convert flat indices to multi-dimensional indices and store in prune_indices
+    
+        # for (_, layer_i, flat_j) in to_prune:
+        #     shape = layer_scores[layer_i].shape
+        #     idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
+        #     prune_indices[layer_i].append(idx_multi)
+    # ---5) --- Quota: compute quotas per layer
     elif pruning_type.lower() == "quota":
-        k_list = [math.floor(pruning_rate * N_i) for N_i in layer_sizes]
+        # 2.a) Compute k_i = floor(pruning_rate * N_i) for each layer
+        k_list = [math.floor(pruning_rate * n) for n in layer_sizes]
         sum_k = sum(k_list)
         
         # 2.b) Adjust to hit exact global target
@@ -181,48 +249,46 @@ def select_pruning_indices(
                     k_list[layer_to_dec] -= 1
                     diff -= 1
                 idx += 1
-        for i, scores in enumerate(layer_scores):
+        
+        for i, flat_scores  in enumerate(layer_scores):
             k_i = k_list[i]
             if k_i <= 0:
                 continue
 
-            flat_scores = scores.view(-1)
             sorted_idx = torch.argsort(flat_scores)  # ascending
-            bottom_k = sorted_idx[:k_i].tolist()
-            for flat_j in bottom_k:
-                shape = scores.shape
-                idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-                prune_indices[i].append(idx_multi)
-    
-    elif pruning_type.lower() == "quotweighted" or pruning_type.lower() == "quotaweighted":
-        # 3.a) Compute average importance per layer: s̄_ℓ = mean(flat_scores_ℓ)
-        avg_importances = []
-        for i, scores in enumerate(layer_scores):
-            flat_scores = scores.view(-1)
-            s_bar = flat_scores.mean().item()
-            # Avoid division by zero; if a layer's average is zero, treat as very small epsilon
-            if abs(s_bar) < 1e-12:
-                s_bar = 1e-12
-            avg_importances.append((s_bar, i))
+            eligible = [j for j in sorted_idx if j not in existing_flat[i]]
+            for flat_j in eligible[:k_i]:
+                prune_indices[i].append(flat_j)
 
-        # 3.b) Compute weights w_ℓ = 1 / s̄_ℓ (higher s̄_ℓ → smaller weight → prune fewer)
+    # 6) --- Quota-weighted: compute quotas based on average importance per layer
+    elif pruning_type.lower() == "quotweighted" or pruning_type.lower() == "quotaweighted":
+        # 6.a) calculate means if not provided
+        if means is None:
+            means = [scores[i].view(-1).mean().item() for i in range(num_layers)]
+        
+        # 6.b) Compute average importance per layer: s̄_ℓ = mean(flat_scores_ℓ)
+        avg_importances = []
+        for i, mean in enumerate(means):
+            avg_importances.append((mean+torch.finfo(torch.float32).eps, i))
+
+        # 6.c) Compute weights w_ℓ = 1 / s̄_ℓ (higher s̄_ℓ → smaller weight → prune fewer)
         weights = []
         for s_bar, i in avg_importances:
             weights.append((1.0 / s_bar, i))
 
-        # 3.c) Normalize weights so that sum of (weight_ℓ) = 1
+        # 6.d) Normalize weights so that sum of (weight_ℓ) = 1
         total_weight = sum(w for w, _ in weights)
         normalized = [(w / total_weight, i) for w, i in weights]
 
-        # 3.d) Compute raw quotas: r_ℓ = normalized_weight_ℓ * N_remove
+        # 6.e) Compute raw quotas: r_ℓ = normalized_weight_ℓ * N_remove
         raw_quotas = [(rw * N_remove, i) for rw, i in normalized]
 
-        # 3.e) Round each to nearest integer: k_list[i] = round(r_ℓ)
+        # 6.f) Round each to nearest integer: k_list[i] = round(r_ℓ)
         k_list = [0] * num_layers
         for rq, i in raw_quotas:
             k_list[i] = int(round(rq))
 
-        # 3.f) Fix rounding error so sum(k_list) == N_remove
+        # 6.g) Fix rounding error so sum(k_list) == N_remove
         sum_k = sum(k_list)
         if sum_k < N_remove:
             diff = N_remove - sum_k
@@ -246,62 +312,89 @@ def select_pruning_indices(
                     diff -= 1
                 idx += 1
 
-        # 3.g) Finally, prune exactly k_list[i] neurons from layer i
+        # 6.h) Finally, prune exactly k_list[i] neurons from layer i
         for i, scores in enumerate(layer_scores):
             k_i = k_list[i]
             if k_i <= 0:
                 continue
 
-            flat_scores = scores.view(-1)
-            sorted_idx = torch.argsort(flat_scores)  # ascending
-            bottom_k = sorted_idx[:k_i].tolist()
-            for flat_j in bottom_k:
-                shape = scores.shape
-                idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-                prune_indices[i].append(idx_multi)
+            sorted_idx = torch.argsort(scores).tolist()  # ascending
+            eligible = [j for j in sorted_idx if j not in existing_flat[i]]  # already pruned indices
+
+            for flat_j in eligible[:k_i]:
+                prune_indices[i].append(flat_j)
+            # for flat_j in bottom_k:
+            #     shape = scores.shape
+            #     idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
+            #     prune_indices[i].append(idx_multi)
+    # 7) --- Hybrid: convert to percentiles and prune lowest N_remove
     elif pruning_type.lower() == "hybrid":
         candidates = []  # list of (percentile, layer_idx, flat_idx)
-        for i, scores in enumerate(layer_scores):
-            flat_scores = scores.view(-1)
+        for i, flat_scores in enumerate(layer_scores):
             N_i = flat_scores.numel()
-            if N_i == 0:
-                continue
+            sorted_idx = torch.argsort(flat_scores).tolist()
 
-            sorted_idx = torch.argsort(flat_scores)  # ascending
+              # ascending
             # sorted_idx[j] is the flat index of j-th smallest score; percentile = (j+1)/N_i
-            for rank_pos, flat_j in enumerate(sorted_idx):
-                r = float(rank_pos + 1) / float(N_i)
-                candidates.append((r, i, int(flat_j.item())))
+            for rank, flat_j in enumerate(sorted_idx):
+                if flat_j in existing_flat[i]:
+                    continue
+                pct = (rank + 1) / N_i
+                candidates.append((pct, i, flat_j))
 
         # sort ascending by percentile → lowest percentile = least important
         candidates.sort(key=lambda x: x[0])
-
-        to_prune = candidates[:N_remove]
-        for (_, layer_i, flat_j) in to_prune:
-            shape = layer_scores[layer_i].shape
-            idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
-            prune_indices[layer_i].append(idx_multi)
+        for _, layer_i, flat_j in candidates[:N_remove]:
+            prune_indices[layer_i].append(flat_j)
 
     else:
         raise ValueError(
             f"Unknown pruning_type '{pruning_type}'. Choose 'Normalization', 'Quota', or 'Hybrid'."
         )
+
+    for i in range(num_layers):
+        seen = set()
+        uniq = []
+        for j in prune_indices[i]:
+            if j not in seen:
+                seen.add(j)
+                uniq.append(j)
+        prune_indices[i] = uniq
+
+    return prune_indices
+def expand_prune_indices(
+    flat_prune_indices: Dict[int, List[int]],
+    scores: Dict[int, torch.Tensor]
+) -> Dict[int, List[tuple]]:
+    """
+    Take the flat‐integer prune indices per layer, and convert each
+    back into a multi-dimensional index tuple using the original score shapes.
+    """
+    expanded: Dict[int, List[tuple]] = {}
+    for layer_i, flats in flat_prune_indices.items():
+        shape = scores[layer_i].shape
+        expanded[layer_i] = [
+            tuple(int(x) for x in torch.unravel_index(torch.tensor(f), shape))
+            for f in flats
+        ]
+    return expanded
+
     # for (i,) in prune_indices[0]:
     #     print(model.scores[f"drop_{0}"][i].item(), i)
     # ----------------------------------------------------------------------------
     # 8) --- return the dictionary of indices to prune
     # ----------------------------------------------------------------------------
-    y= 0
-    for key, tuple_list in prune_indices.items():
-        x = []
-        for tup in tuple_list:
-            if y == 1:
-                print(tup)
-            if isinstance(tup, int):
-                x.append(tup)
-            elif isinstance(tup, tuple):
-                x.append(tup[0])
-        y=1
-        prune_indices[key] = x
+    # y= 0
+    # for key, tuple_list in prune_indices.items():
+    #     x = []
+    #     for tup in tuple_list:
+    #         # if y == 1:
+    #         #     print(tup)
+    #         if isinstance(tup, int):
+    #             x.append(tup)
+    #         elif isinstance(tup, tuple):
+    #             x.append(tup[0])
+    #     y=1
+    #     prune_indices[key] = x
 
-    return prune_indices
+    # return prune_indices

@@ -248,17 +248,10 @@ class MyVisionTransformer(VisionTransformer):
                 else:
                     # Accumulate the score_mean
                     self.scores[f'drop_{i}'] += score_mean
-
+                
         # Update the dropout masks based on the accumulated conductances
         for i, drop_layer in enumerate(self.drop_list):
             score = self.scores[f'drop_{i}'] / float(len(batches))
-            if alt_attention_cond and (i % 4 == 0):
-                N = score.shape[0]  # Number of tokens
-                qkv = score.reshape(N, 3, self.blocks[i // 4].attn.num_heads, self.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
-                q, k, v = qkv.unbind(0)
-                q, k = self.blocks[i // 4].attn.q_norm(q), self.blocks[i // 4].attn.k_norm(k)
-                q = q * self.blocks[i // 4].attn.scale
-                score = q @ k.transpose(-2, -1)
 
             if noisy_score:
                 #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
