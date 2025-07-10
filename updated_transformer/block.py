@@ -44,7 +44,8 @@ class Block(nn.Module):
             scaler: Optional[float] = 1.0,
             transformer_mean: bool = False,
             rescaling_type: Optional[str] = None,
-            scale_attn_norm: bool = False,
+            scale_attn_norm: bool = False,   # <— new
+            **kwargs, 
 
 
     ) -> None:
