@@ -513,10 +513,22 @@ def main(args):
     # criterion = DistillationLoss(
     #     criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
     # )
+    args.experiment_name = f"{args.experiment_name}_seed{args.seed}"
+
 
     output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    default_resume = True if not args.resume else False
+    if default_resume:
+        resume_path = output_dir / 'checkpoint.pth'
+        if resume_path.exists():
+            args.resume = str(resume_path)
+            print(f"No --resume given, auto-resuming from {args.resume}")
+        else:
+            print(f"No --resume given and no checkpoint at {resume_path}, starting fresh.")
+
 
     if args.resume:
         try:

@@ -382,9 +382,22 @@ def main(args):
     # Set up optimizer and loss function.
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
+    args.experiment_name = f"{args.experiment_name}_seed{args.seed}"
+
+
     output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    default_resume = True if not args.resume else False
+    if default_resume:
+        resume_path = output_dir / 'checkpoint.pth'
+        if resume_path.exists():
+            args.resume = str(resume_path)
+            print(f"No --resume given, auto-resuming from {args.resume}")
+        else:
+            print(f"No --resume given and no checkpoint at {resume_path}, starting fresh.")
+
     # dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     # model(dummy_input)
     
