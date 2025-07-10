@@ -415,6 +415,7 @@ def main(args):
         pruning_rate = args.pruning_rate,
         uncertainty = args.uncertainty,
         normalization= args.normalization,
+        transformer = args.model != 'simplecnn',
         next_layer = args.next_layer,
         w_avg_rate= args.w_avg_rate,
         help_par =0 if args.model == 'simplecnn' else 1,

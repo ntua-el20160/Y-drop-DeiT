@@ -235,6 +235,8 @@ def prune_and_train(model: torch.nn.Module, criterion: torch.nn.Module,
         logged_iter = metric_logger.log_every(data_loader, print_freq, header)
 
         for batch_idx, (samples, targets) in enumerate(logged_iter):
+            if batch_idx >5:
+                break
             samples = samples.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
             if mixup_fn is not None:
@@ -317,19 +319,19 @@ def prune_and_train(model: torch.nn.Module, criterion: torch.nn.Module,
         epoch_time = time.time() - epoch_start_time
         cumulative_train_time += epoch_time
 
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Before pruning: Accuracy of the network on the  test images: {test_stats['acc1']:.1f}%")
-        log_stats = {
-            'epoch': epoch,
-            'before_pruning': "True",
-            'train_loss': metric_logger.loss.global_avg,
-            'test_acc': test_stats.get('acc1', 0),
-            'time': cumulative_train_time,
-            'test_loss': test_stats.get('loss', 0),
-        }
-        if output_dir :
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+        # test_stats = evaluate(data_loader_val, model, device)
+        # print(f"Before pruning: Accuracy of the network on the  test images: {test_stats['acc1']:.1f}%")
+        # log_stats = {
+        #     'epoch': epoch,
+        #     'before_pruning': "True",
+        #     'train_loss': metric_logger.loss.global_avg,
+        #     'test_acc': test_stats.get('acc1', 0),
+        #     'time': cumulative_train_time,
+        #     'test_loss': test_stats.get('loss', 0),
+        # }
+        # if output_dir :
+        #     with (output_dir / "log.txt").open("a") as f:
+        #         f.write(json.dumps(log_stats) + "\n")
         prune_indices = select_pruning_indices(acc_scores,pruning_rate,pruning_type,prune_indices,acc_means)
         exp_prune_indices = expand_prune_indices(prune_indices,acc_scores)
         flat_list = [ prune_indices[i] for i in range(len(model.selected_layers)) ]

@@ -96,6 +96,7 @@ def calculate_scores(
     num_batches = len(list(batches))
     for i in new_scores:
         new_scores[i] /= num_batches
+        #print(f"Layer {i} score shape: {new_scores[i].shape}")
 
     means = [s.mean() for s in new_scores.values() if s is not None]
     
@@ -263,14 +264,16 @@ def select_pruning_indices(
     # 6) --- Quota-weighted: compute quotas based on average importance per layer
     elif pruning_type.lower() == "quotweighted" or pruning_type.lower() == "quotaweighted":
         # 6.a) calculate means if not provided
+        for i in range(4):
+            print("Mean of layer {1} is {0}".format(means[i], i))
         if means is None:
             means = [scores[i].view(-1).mean().item() for i in range(num_layers)]
-        
+        print()
         # 6.b) Compute average importance per layer: s̄_ℓ = mean(flat_scores_ℓ)
         avg_importances = []
         for i, mean in enumerate(means):
             avg_importances.append((mean+torch.finfo(torch.float32).eps, i))
-
+        
         # 6.c) Compute weights w_ℓ = 1 / s̄_ℓ (higher s̄_ℓ → smaller weight → prune fewer)
         weights = []
         for s_bar, i in avg_importances:
@@ -279,6 +282,8 @@ def select_pruning_indices(
         # 6.d) Normalize weights so that sum of (weight_ℓ) = 1
         total_weight = sum(w for w, _ in weights)
         normalized = [(w / total_weight, i) for w, i in weights]
+        # for i in range(4):
+        #     print("Importance of layer {1} is {0}".format(normalized[i], i))
 
         # 6.e) Compute raw quotas: r_ℓ = normalized_weight_ℓ * N_remove
         raw_quotas = [(rw * N_remove, i) for rw, i in normalized]
@@ -286,7 +291,8 @@ def select_pruning_indices(
         # 6.f) Round each to nearest integer: k_list[i] = round(r_ℓ)
         k_list = [0] * num_layers
         for rq, i in raw_quotas:
-            k_list[i] = int(round(rq))
+            val = rq.item() if isinstance(rq, torch.Tensor) else rq
+            k_list[i] = int(round(val))
 
         # 6.g) Fix rounding error so sum(k_list) == N_remove
         sum_k = sum(k_list)
@@ -314,6 +320,8 @@ def select_pruning_indices(
 
         # 6.h) Finally, prune exactly k_list[i] neurons from layer i
         for i, scores in enumerate(layer_scores):
+            if i < 4:
+                print("hi")
             k_i = k_list[i]
             if k_i <= 0:
                 continue
@@ -323,6 +331,15 @@ def select_pruning_indices(
 
             for flat_j in eligible[:k_i]:
                 prune_indices[i].append(flat_j)
+            # if i<4:
+            #     print("score of layer {1} is {0}".format(scores, i))
+            #     print("Pruning layer {1} at index {0}".format(prune_indices[i], i))
+
+            # if i <4:
+            #     print("score of layer {1} is {0}".format(scores, i))
+
+            #     print("Pruning layer {1} at index {0}".format(prune_indices[i], i))
+
             # for flat_j in bottom_k:
             #     shape = scores.shape
             #     idx_multi = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_j), shape))
@@ -336,14 +353,20 @@ def select_pruning_indices(
 
               # ascending
             # sorted_idx[j] is the flat index of j-th smallest score; percentile = (j+1)/N_i
+            i = 0
             for rank, flat_j in enumerate(sorted_idx):
                 if flat_j in existing_flat[i]:
                     continue
                 pct = (rank + 1) / N_i
                 candidates.append((pct, i, flat_j))
+                if i <4:
+                    print("score of layer {1} is {0}".format(flat_scores, i))
+                i+=1
 
         # sort ascending by percentile → lowest percentile = least important
         candidates.sort(key=lambda x: x[0])
+        i=0
+
         for _, layer_i, flat_j in candidates[:N_remove]:
             prune_indices[layer_i].append(flat_j)
 

@@ -131,7 +131,7 @@ def generate_prune_masks_transformer(
         wm, bm = create_linear_mask(block.attn.qkv,   qkv_idx, dim=0)
         # wm,bm =torch.ones_like(block.attn.qkv.weight.data), None
         masks_per_block.append((wm, bm))
-
+        
         # 2) Proj output rows
         wm, bm = create_linear_mask(block.attn.proj,  proj_idx, dim=0)
         #wm,bm =torch.ones_like(block.attn.proj.weight.data), None
@@ -145,6 +145,9 @@ def generate_prune_masks_transformer(
                                         weight_mask=wm1, bias_mask=bm1)
         else:
             wm2, bm2 = create_linear_mask(block.mlp.fc1,  fc1_idx, dim=0)
+        print("FC1 mask indices:", fc1_idx)
+        print("FC1 mask:", wm2)
+        print(bm2)
         masks_per_block.append((wm2, bm2))
 
         # 4) MLP fc2: in cols then out rows
