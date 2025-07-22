@@ -41,7 +41,7 @@ class MyVisionTransformer(VisionTransformer):
         self.drop_list = []
         self.selected_layers = []
         self.scores = {}
-        self.criter = None
+        self.criter = nn.CrossEntropyLoss(reduction='none')
         for block in self.blocks:
             for module in block.drop_list:
                 self.drop_list.append(module)
@@ -53,10 +53,13 @@ class MyVisionTransformer(VisionTransformer):
         Set the criterion for the model.
         This is used to compute loss during training.
         """
-        out = self.forward(x)
-        if self.criter is None:
-            self.criter = nn.CrossEntropyLoss(reduction='none')
-        return self.criter(out, y_true)
+        logits = self.forward(x)        # [B, C]
+        # ensure self.criter is on the right device
+        self.criter = self.criter.to(logits.device)
+        # compute per‐sample loss
+        loss_per_sample = self.criter(logits, y_true)
+        # shape = [B], exactly what Captum needs
+        return loss_per_sample
     
     def use_normal_dropout(self):
         for drop in self.drop_list:
