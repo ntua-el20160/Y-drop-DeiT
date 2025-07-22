@@ -306,13 +306,20 @@ class MyDropout(nn.Module):
 
             return mask * input / (self.base_keep)
         else:
-            #mask = torch.empty_like(input).bernoulli_(self.previous)
-            #print("dropout_mask_shape:",self.previous.shape)
-            mask = torch.empty_like(input).bernoulli_(self.previous)
-            #print("Neuron amount",mask.shape)
-            #print("Amount of zeroes in mask: ",torch.sum(mask == 0))
+            
+            probs = self.previous  # shape: (x, y)
 
-            return mask * input / (self.scaling)
+            # Expand to input shape
+            expanded_probs = probs.expand_as(input)  # input shape: (b, x, y) or (b, p, x, y)
+            expanded_scaling = self.scaling.expand_as(input)  # shape: (b, x, y) or (b, p, x, y)
+            # Sample from Bernoulli distribution
+            #mask = torch.bernoulli(expanded_probs)
+            # m1 = torch.bernoulli(probs)
+            # mask = m1.expand_as(input)  # Expand mask to match input shape
+            mask = torch.bernoulli(expanded_probs)
+            #return mask * input / (self.base_keep)  # Avoid division by zero with a small epsilon
+            return mask * input / (expanded_scaling + 1e-12)  # Avoid division by zero with a small epsilon
+
     def update_aggregated_statistics(self, scoring, keep_prob):
         """
         Update incremental (running) aggregated statistics with the new scoring and keep_prob values.
@@ -329,7 +336,7 @@ class MyDropout(nn.Module):
         # print("Scoring shape: ",scoring_det.shape)
         # print("Keep rate shape: ",keep_prob_det.shape)        
         # b) Update running means per neuron.
-        if self.running_scoring_mean is None:
+        if self.running_scoring_mean is None or self.running_dropout_mean is None:
             self.running_scoring_mean = scoring_det.clone()
             self.running_dropout_mean = keep_prob_det.clone()
         else:
@@ -412,14 +419,16 @@ class MyDropout(nn.Module):
         np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist_focused.npy"), self.scoring_hist_focused)
 
         # 2) Running means (convert to numpy)
-        np.save(
-            os.path.join(epoch_dir, f"{layer_label}_running_scoring_mean.npy"),
-            self.running_scoring_mean.cpu().numpy()
-        )
-        np.save(
-            os.path.join(epoch_dir, f"{layer_label}_running_dropout_mean.npy"),
-            self.running_dropout_mean.cpu().numpy()
-        )
+        if self.running_scoring_mean is None:
+            np.save(
+                os.path.join(epoch_dir, f"{layer_label}_running_scoring_mean.npy"),
+                self.running_scoring_mean.cpu().numpy()
+            )
+        if self.running_dropout_mean is None:
+            np.save(
+                os.path.join(epoch_dir, f"{layer_label}_running_dropout_mean.npy"),
+                self.running_dropout_mean.cpu().numpy()
+            )
         for i, neuron in enumerate(self.random_neurons):
             neuron_str = "_".join(str(x) for x in neuron)
 

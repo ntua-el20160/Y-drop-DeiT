@@ -70,7 +70,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     new_iter = iter(data_loader)
     
 
-    # print('check:', check)
+    print('check:', check)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
@@ -86,15 +86,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         bs,bt = samples, targets
                     else:
                         bs, bt = next(new_iter)
-                        #big_batches = list(itertools.islice(new_iter, math.ceil(update_batches/helper)))
-                    # for i in range(update_batches):
-                    #     b = i//helper
-                    #     ig = i%helper
-                    #     nb = min(update_batches, len(sample_chunks))
-                    sample_chunks = bs.split(32)
-                    target_chunks = bt.split(32)
-                    nb = min(update_batches, len(sample_chunks))
-                    next_batches = [(sample_chunks[i], target_chunks[i]) for i in range(nb)]
+
+                    # sample_chunks = bs.split(32)
+                    # target_chunks = bt.split(32)
+                    # nb = min(update_batches, len(sample_chunks))
+                    # print("nb:")
+                    # next_batches = [(sample_chunks[i], target_chunks[i]) for i in range(nb)]
+                    next_batches = [(bs.clone(), bt.clone()) for _ in range(update_batches)]
 
                         # full_samples, full_targets = big_batches[b]
                         # sub_samples = full_samples[32*ig:32*(ig+1)]
@@ -116,17 +114,21 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     sm = False
                 else:
                     sm = True
-                model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
+                if hasattr(model, 'module'):
+                    model.module.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
+                                       noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
+                else:
+                    model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
                                        noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
 
 
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
-            if stats and batch_idx % 350 == 0:
-                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data","images")
+            #if stats and batch_idx % 350 == 0:
+             #   epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data","images")
 
-                model.plot_current_stats(epoch+1,batch_idx, epoch_dir)
+              #  model.plot_current_stats(epoch+1,batch_idx, epoch_dir)
 
                 
             

@@ -1,9 +1,4 @@
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
-#
-# This source code is licensed under the CC-by-NC license found in the
-# LICENSE file in the root directory of this source tree.
-#
+
 import argparse
 import datetime
 import numpy as np
@@ -30,8 +25,6 @@ from samplers import RASampler
 import models
 import utils
 #import models_v2
-
-
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
@@ -57,8 +50,8 @@ def get_args_parser():
     parser.set_defaults(model_ema=True)
     parser.add_argument('--model-ema-decay', type=float, default=0.99996, help='')
     parser.add_argument('--model-ema-force-cpu', action='store_true', default=False, help='')
-    
-    
+
+
     parser.add_argument('--experiment_name', default='simpletransformer', type=str, help='experiment name')
 
     # Optimizer parameters
@@ -248,8 +241,6 @@ def get_args_parser():
                     help='Method to rescale the the limits of the dropout masks')
     
     return parser
-
-
 def main(args):
     utils.init_distributed_mode(args)
 
@@ -291,50 +282,8 @@ def main(args):
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
-    def preload_subdataset(subdataset):
-        """
-        Given a small subdataset (a torch.utils.data.Subset),
-        load all (data, target) pairs into memory as a list.
-        """
-        cached = [subdataset[i] for i in range(len(subdataset))]
-        return cached
-    
-    if args.sub_dataset == 'stratified':
-        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
-        cached_subdataset = preload_subdataset(sub_dataset)
-    elif args.sub_dataset == 'random':
-        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
-        cached_subdataset = preload_subdataset(sub_dataset)
-    else:
-        cached_subdataset = None
-    
-    effective_epochs = args.epochs - args.annealing_factor
-    step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1) 
-
-    if args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
-        if args.repeated_aug:
-            sampler_train = RASampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        if args.dist_eval:
-            if len(dataset_val) % num_tasks != 0:
-                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                      'equal num of samples per-process.')
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
-        else:
-            sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
@@ -361,97 +310,38 @@ def main(args):
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
-
-#     model = create_model(
-#     args.model,
-#     pretrained=False,
-#     num_classes=args.nb_classes,
-#     drop=args.drop,
-#     drop_path_rate=args.drop_path,
-#     drop_block_rate=args.drop_block,
-# )
     print(f"Creating model: {args.model}")
 
     model = create_model(
-    args.model,
-    pretrained=False,
-    num_classes=args.nb_classes,
-    drop_rate=args.drop_rate,   # changed from --drop
-    drop_path_rate=args.drop_path,
-    drop_block_rate=args.drop_block,
-    # pass our extra custom keys. You can add them here:
-    ydrop=args.ydrop,
-    mask_type=args.mask_type,
-    elasticity=args.elasticity,
-    scaler=args.scaler,
-    n_steps=args.n_steps,
-    transformer_mean=args.transformer_mean,
-    rescaling_type=args.rescaling_type,
-)
-                    
-    # if args.finetune:
-    #     if args.finetune.startswith('https'):
-    #         checkpoint = torch.hub.load_state_dict_from_url(
-    #             args.finetune, map_location='cpu', check_hash=True)
-    #     else:
-    #         checkpoint = torch.load(args.finetune, map_location='cpu')
+        args.model,
+        pretrained=False,
+        num_classes=args.nb_classes,
+        drop_rate=args.drop_rate,   # changed from --drop
+        drop_path_rate=args.drop_path,
+        drop_block_rate=args.drop_block,
+        # pass our extra custom keys. You can add them here:
+        ydrop=args.ydrop,
+        mask_type=args.mask_type,
+        elasticity=args.elasticity,
+        scaler=args.scaler,
+        n_steps=args.n_steps,
+        transformer_mean=args.transformer_mean,
+        rescaling_type=args.rescaling_type,
+        )
+           
 
-    #     checkpoint_model = checkpoint['model']
-    #     state_dict = model.state_dict()
-    #     for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
-    #         if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-    #             print(f"Removing key {k} from pretrained checkpoint")
-    #             del checkpoint_model[k]
+    for i,block in enumerate(model.blocks):
+        model.selected_layers[i*4 + 1] = block.norm2
 
-    #     # interpolate position embedding
-    #     pos_embed_checkpoint = checkpoint_model['pos_embed']
-    #     embedding_size = pos_embed_checkpoint.shape[-1]
-    #     num_patches = model.patch_embed.num_patches
-    #     num_extra_tokens = model.pos_embed.shape[-2] - num_patches
-    #     # height (== width) for the checkpoint position embedding
-    #     orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
-    #     # height (== width) for the new position embedding
-    #     new_size = int(num_patches ** 0.5)
-    #     # class_token and dist_token are kept unchanged
-    #     extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-    #     # only the position tokens are interpolated
-    #     pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-    #     pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
-    #     pos_tokens = torch.nn.functional.interpolate(
-    #         pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
-    #     pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
-    #     new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-    #     checkpoint_model['pos_embed'] = new_pos_embed
-
-    #     model.load_state_dict(checkpoint_model, strict=False)
-        
-
-
-    ### TO CHECK: AFTER NORM
-    if args.after_norm:
-        for i,block in enumerate(model.blocks):
-            model.selected_layers[i*4 + 1] = block.norm2
-
-        for i in range(len(model.blocks)-1):
-            model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
-    if args.alt_attention_cond:
-        for i, block in enumerate(model.blocks):
-            model.selected_layers[i*4] = block.attn.qkv
-
-
-    
-
-
-
-
-    # TODO: finetuning
-
+    for i in range(len(model.blocks)-1):
+        model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
     model.to(device)
     dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
     model(dummy_input)
-    
-    
+        
     model_ema = None
+    model_without_ddp = model
+
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         ema_device = torch.device('cpu') if args.model_ema_force_cpu else device
@@ -460,24 +350,6 @@ def main(args):
             decay=args.model_ema_decay,
             device=ema_device,
             resume='')
-    # if args.model_ema:
-    # # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
-    #    ema_device = 'cpu' if args.model_ema_force_cpu else device
-    #    model_ema = ModelEma(
-    #        model,
-    #        decay=args.model_ema_decay,
-    #        device=ema_device,
-    #        resume=''
-    #  )
-
-
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
-
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
     optimizer = create_optimizer(args, model_without_ddp)
@@ -495,157 +367,31 @@ def main(args):
     else:
         criterion = torch.nn.CrossEntropyLoss()
     model_without_ddp.criterion = criterion
-    # teacher_model = None
-    # if args.distillation_type != 'none':
-    #     assert args.teacher_path, 'need to specify teacher-path when using distillation'
-    #     print(f"Creating teacher model: {args.teacher_model}")
-    #     teacher_model = create_model(
-    #         args.teacher_model,
-    #         pretrained=False,
-    #         num_classes=args.nb_classes,
-    #         global_pool='avg',
-    #     )
-    #     if args.teacher_path.startswith('https'):
-    #         checkpoint = torch.hub.load_state_dict_from_url(
-    #             args.teacher_path, map_location='cpu', check_hash=True)
-    #     else:
-    #         checkpoint = torch.load(args.teacher_path, map_location='cpu')
-    #     teacher_model.load_state_dict(checkpoint['model'])
-    #     teacher_model.to(device)
-    #     teacher_model.eval()
-    # wrap the criterion in our custom DistillationLoss, which
-    # just dispatches to the original criterion if args.distillation_type is 'none'
-    # criterion = DistillationLoss(
-    #     criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
-    # )
-    args.experiment_name = f"{args.experiment_name}_seed{args.seed}"
-
 
     output_dir = Path(args.output_dir)
     output_dir = output_dir / args.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    default_resume = True if not args.resume else False
-    if default_resume:
-        resume_path = output_dir / 'checkpoint.pth'
-        if resume_path.exists():
-            args.resume = str(resume_path)
-            print(f"No --resume given, auto-resuming from {args.resume}")
-        else:
-            print(f"No --resume given and no checkpoint at {resume_path}, starting fresh.")
-
-
-    if args.resume:
-        try:
-            if args.resume.startswith('https'):
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    args.resume, map_location='cpu', check_hash=True)
-            else:
-                checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-
-            model_without_ddp.load_state_dict(checkpoint['model'])
-            model_without_ddp.to(device)
-           
-            if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-                
-                history = checkpoint.get('history', {})
-                if history:
-                    for i, drop in enumerate(model_without_ddp.drop_list):
-                        drop_history = history.get(f'drop{i}', {})
-                        drop.progression_keep = drop_history.get('progression_keep', [])
-                        drop.progression_scoring = drop_history.get('progression_scoring', [])
-                if args.model_ema:
-                    utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-                if 'loss_scaler' in checkpoint:
-                    loss_scaler.load_state_dict(checkpoint['loss_scaler'])
-            
-            best_loss = checkpoint.get('lowest_loss', float('inf'))
-            cumulative_train_time = checkpoint.get('train_time', 0.0)
-            saved_epoch = checkpoint.get('epoch', 0)
-            if saved_epoch >0:
-                saved_epoch+=1
-
-            lr_scheduler.step(saved_epoch)
-
-            best_acc = checkpoint.get('best_acc', 0.0)
-            patience_counter = checkpoint.get('patience_counter', 0)
-            best_epoch = checkpoint.get('best_epoch', 1)
-        except Exception as e:
-            print("Error loading:",e)  
-            best_loss = float('inf')
-            saved_epoch = 0
-            cumulative_train_time = 0.0
-            best_acc = 0.0
-            patience_counter = 0
-            best_epoch =1
-
-    else:
-        best_loss = float('inf')
-        saved_epoch = 0
-        cumulative_train_time = 0.0
-        best_acc = 0.0
-        patience_counter = 0
-        best_epoch =1
-
     
-
-    if args.update_scaling == 'increasing':
-        update_freq = 1
-    else:
-        update_freq = args.update_freq
-    
-    effective_epochs = args.epochs - args.annealing_factor
-    step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1) 
-
-    if args.eval:
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        return
-
-    print("Start training")
-    #initially normal dropout
     if args.ydrop:
         if hasattr(model, 'module'):
             model.module.use_normal_dropout()
         else:
             model.use_normal_dropout() 
-
     check = False
     import os
-    for epoch in range(saved_epoch, args.epochs):
+    for epoch in range(0, args.epochs):
 
         epoch_start_time = time.time()
         stats = False
-
-        
         if args.ydrop and epoch >= args.annealing_factor:
             if hasattr(model, 'module'):
                 model.module.use_ydrop()
             else:
-                model.use_ydrop() 
-            check = True
-            if (epoch+1)%args.plot_freq == 0:
-                stats = True
-                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
-                os.makedirs(epoch_dir, exist_ok=True)
-
-            if args.update_scaling!='no':
-                i = (epoch - args.annealing_factor) // step_size
-                i = min(i, args.update_scaling_steps - 1)
-
-                if args.update_scaling == 'increasing':
-                    step_index = i
-                else:
-                    step_index = args.update_scaling_steps - 1 - i
-                update_freq = round(1 + (args.update_freq - 1) * step_index / denom)
-                print(f"[Epoch {epoch}] Update frequency set to {update_freq}")
-        
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-
+                model.use_ydrop()
+        if (epoch+1)%args.plot_freq == 0:
+            stats = True
+            epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
+            os.makedirs(epoch_dir, exist_ok=True) 
         train_stats = train_one_epoch(
             model=model,
             criterion=criterion,
@@ -658,27 +404,23 @@ def main(args):
             model_ema=model_ema,
             mixup_fn=mixup_fn,
             check=check,
-            update_freq=update_freq,
-            update_batches=args.update_batches,
+            update_freq=1,
+            update_batches=1,
             stats = stats,
-            scoring_type = args.scoring_type,
-            same_batch = args.same_batch,
+            scoring_type = "Conductance_alt",
+            same_batch = False,
             help_par = 1,
-            noisy_score = args.noisy_score,
-            noisy_dropout = args.noisy_dropout,
-            update_data_loader = cached_subdataset,
+            noisy_score = False,
+            noisy_dropout = False,
+            update_data_loader = None,
             output_dir=output_dir,
             min_dropout=args.min_dropout,
-            alt_attention_cond=args.alt_attention_cond,
+            alt_attention_cond=False,
             mask_type=args.mask_type,
         )
-
-        
-
         lr_scheduler.step(epoch)
         epoch_time = time.time() - epoch_start_time
         cumulative_train_time += epoch_time
-
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -698,82 +440,6 @@ def main(args):
                 model.save_statistics(epoch_dir)
                 plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
                 model.clear_progression()
-
-
-        
-        if test_stats.get('acc1', 0) > best_acc:
-            best_acc = test_stats.get('acc1', 0)
-            best_epoch = epoch + 1
-        
-        # print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-        #       f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
-        
-        checkpoint ={
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'model_ema': get_state_dict(model_ema),
-                'loss_scaler': loss_scaler.state_dict() if loss_scaler is not None else None,
-                'args': args,
-                'test_acc': test_acc,
-                'test_loss': test_loss,
-                'lowest_loss': best_loss,
-                'train_time': cumulative_train_time,  # cumulative training time so far
-                'best_acc': best_acc,
-                'patience_counter': patience_counter,
-                'best_epoch': best_epoch
-                }
-        if args.ydrop:
-            checkpoint['history'] = {}
-            for i, drop in enumerate(model.module.drop_list if hasattr(model, 'module') else model.drop_list):
-                checkpoint['history'][f'drop{i}'] = {
-                    'progression_keep': drop.progression_keep,
-                    'progression_scoring': drop.progression_scoring,
-                }   
-        if test_loss < best_loss:
-            best_loss = test_loss
-            checkpoint['lowest_loss'] = best_loss
-            patience_counter = 0  # reset early stopping counter
-            checkpoint['patience_counter'] = patience_counter
-
-            if args.output_dir:  
-                utils.save_on_master(checkpoint, output_dir / 'best.pth')
-        else:
-            patience_counter += 1
-            checkpoint['patience_counter'] = patience_counter
-                 
-        print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
-        
-        if args.output_dir:
-            utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')
-        
-
-        
-        log_stats = {
-            'epoch': epoch,
-            'train_loss': train_stats.get('loss', 0),
-            'test_acc': test_stats.get('acc1', 0),
-            'time': cumulative_train_time,
-            'best_acc': best_acc,
-            'test_loss': test_stats.get('loss', 0),
-            'best_loss': best_loss,
-            'patience_counter': patience_counter,
-        }
-
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
-        if patience_counter >= args.early_stopping_patience:
-            print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
-            break
-
-
-    total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
-    print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
-        
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
