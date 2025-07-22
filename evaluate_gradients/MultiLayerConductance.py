@@ -344,7 +344,7 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
                 return_convergence_delta=True,        # <— ask for δ
             )
             
-            print("IG convergence δ:", ig_delta) 
+            #print("IG convergence δ:", ig_delta) 
         if return_convergence_delta:
             start_point, end_point = baselines, inputs
             delta =[]
@@ -387,10 +387,10 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
         else:
             _, alphas = step_sizes_and_alphas
         # Compute scaled inputs from baseline to final input.
-        print(f"Inputs shape: {inputs[0].shape}")
-        print(f"Baselines shape: {baselines[0].shape}")
+        #print(f"Inputs shape: {inputs[0].shape}")
+        #print(f"Baselines shape: {baselines[0].shape}")
         
-        print(len(inputs), len(baselines), n_steps, alphas)
+        #print(len(inputs), len(baselines), n_steps, alphas)
         if self.geodesic:
             scaled_features_tpl = tuple(
                 torch.cat(
@@ -406,8 +406,8 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
                 ).requires_grad_()
                 for input, baseline in zip(inputs, baselines)
             )
-            for i, input in enumerate(scaled_features_tpl):
-                print(f"Scaled input {i} shape: {input.shape}")
+            # for i, input in enumerate(scaled_features_tpl):
+            #     print(f"Scaled input {i} shape: {input.shape}")
 
         additional_forward_args = _format_additional_forward_args(
             additional_forward_args
@@ -439,10 +439,10 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
             attribute_to_layer_input=False,
             grad_kwargs=grad_kwargs,
         )
-        for i, layer_eval in enumerate(layer_evals):
-            #print(layer_eval)
-            print(f"Layer eval {i} shape: {layer_eval[0].shape}")
-            print(f"Layer gradient {i} shape: {layer_gradients[i][0].shape}")
+        # for i, layer_eval in enumerate(layer_evals):
+        #     #print(layer_eval)
+        #     print(f"Layer eval {i} shape: {layer_eval[0].shape}")
+        #     print(f"Layer gradient {i} shape: {layer_gradients[i][0].shape}")
 
         # Compute differences between consecutive evaluations of layer_eval.
         # This approximates the total input gradient of each step multiplied
@@ -462,8 +462,8 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
                     t[num_examples:] - t[:-num_examples] for t in layer_eval_tuple
                 )
                 grad_diffs.append(layer_grad_diff)
-        for i, grad_diff in enumerate(grad_diffs):
-            print(f"Gradient diff {i} shape: {grad_diff[0].shape}")
+        # for i, grad_diff in enumerate(grad_diffs):
+        #     print(f"Gradient diff {i} shape: {grad_diff[0].shape}")
         # Element-wise multiply gradient of output with respect to hidden layer
         # and summed gradients with respect to input (chain rule) and sum
         # across stepped inputs.

@@ -130,6 +130,7 @@ class MyVisionTransformer(VisionTransformer):
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
+            y_batch = y_batch.to(device, non_blocking=True).long()
 
 
             # Get model predictions
