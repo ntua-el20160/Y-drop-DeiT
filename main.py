@@ -492,9 +492,10 @@ def main(args):
         criterion = SoftTargetCrossEntropy()
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+        model_without_ddp.criter = LabelSmoothingCrossEntropy(smoothing=args.smoothing, reduction='none')
     else:
         criterion = torch.nn.CrossEntropyLoss()
-    model_without_ddp.criterion = criterion
+        model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
     # teacher_model = None
     # if args.distillation_type != 'none':
     #     assert args.teacher_path, 'need to specify teacher-path when using distillation'

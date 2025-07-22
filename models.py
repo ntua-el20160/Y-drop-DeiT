@@ -54,9 +54,8 @@ class MyVisionTransformer(VisionTransformer):
         This is used to compute loss during training.
         """
         out = self.forward(x)
-        print("hi")
         if self.criter is None:
-            self.criter = nn.CrossEntropyLoss()
+            self.criter = nn.CrossEntropyLoss(reduction='none')
         return self.criter(out, y_true)
     
     def use_normal_dropout(self):
@@ -163,7 +162,7 @@ class MyVisionTransformer(VisionTransformer):
             for i, score in enumerate(captum_attrs):
                 #score_mean = score.mean(dim=0)
                 #score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
-                if scoring_type == "Sensitivity" or scoring_type == "Conductance_alt":
+                if scoring_type == "Sensitivity":
                     score_mean = score
                 elif sm:
                     score_mean = score.sum(dim =0)

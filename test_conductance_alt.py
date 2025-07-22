@@ -24,7 +24,12 @@ from samplers import RASampler
 #from augment import new_data_aug_generator
 import models
 import utils
-#import models_v2
+from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
+import torch
+import torchvision.transforms as T
+from torchvision.models import resnet18
+from PIL import Image
+import matplotlib.pyplot as plt
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
@@ -278,44 +283,15 @@ def main(args):
 
     #cudnn.benchmark = True
     device = torch.device(args.device)
+    from torchvision.datasets import CIFAR10
+    raw_ds = CIFAR10(root=args.data_path, train=True, download=False, transform=None)
+    img_sample, label_sample = raw_ds[0]
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
-
-    sampler_train = torch.utils.data.RandomSampler(dataset_train)
-    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
-    # if args.ThreeAugment:
-    #     data_loader_train.dataset.transform = new_data_aug_generator(args)
-
-    data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=False
-    )
-
-    mixup_fn = None
-    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
-    if mixup_active:
-        mixup_fn = Mixup(
-            mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
-            prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
-            label_smoothing=args.smoothing, num_classes=args.nb_classes)
-    print(f"Creating model: {args.model}")
 
     model = create_model(
         args.model,
         pretrained=False,
-        num_classes=args.nb_classes,
+        num_classes=10,
         drop_rate=args.drop_rate,   # changed from --drop
         drop_path_rate=args.drop_path,
         drop_block_rate=args.drop_block,
@@ -328,20 +304,7 @@ def main(args):
         transformer_mean=args.transformer_mean,
         rescaling_type=args.rescaling_type,
         )
-           
-
-    for i,block in enumerate(model.blocks):
-        model.selected_layers[i*4 + 1] = block.norm2
-
-    for i in range(len(model.blocks)-1):
-        model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
-    model.to(device)
-    dummy_input = torch.randn(1, 3, args.input_size, args.input_size, device=device)
-    model(dummy_input)
-        
     model_ema = None
-    model_without_ddp = model
-
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         ema_device = torch.device('cpu') if args.model_ema_force_cpu else device
@@ -350,96 +313,127 @@ def main(args):
             decay=args.model_ema_decay,
             device=ema_device,
             resume='')
-    linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
-    args.lr = linear_scaled_lr
-    optimizer = create_optimizer(args, model_without_ddp)
-    loss_scaler = NativeScaler()
+    try:
+        print(f"Resuming from checkpoint: {args.resume}")
 
-    lr_scheduler, _ = create_scheduler(args, optimizer)
-
-    criterion = LabelSmoothingCrossEntropy()
-
-    if args.mixup > 0.:
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif args.smoothing:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
-    model_without_ddp.criterion = criterion
-
-    output_dir = Path(args.output_dir)
-    output_dir = output_dir / args.experiment_name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    if args.ydrop:
-        if hasattr(model, 'module'):
-            model.module.use_normal_dropout()
+        if args.resume.startswith('https'):
+            checkpoint = torch.hub.load_state_dict_from_url(
+                args.resume, map_location='cpu', check_hash=True)
         else:
-            model.use_normal_dropout() 
-    check = False
-    import os
-    for epoch in range(0, args.epochs):
-
-        epoch_start_time = time.time()
-        stats = False
-        if args.ydrop and epoch >= args.annealing_factor:
-            if hasattr(model, 'module'):
-                model.module.use_ydrop()
-            else:
-                model.use_ydrop()
-        if (epoch+1)%args.plot_freq == 0:
-            stats = True
-            epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
-            os.makedirs(epoch_dir, exist_ok=True) 
-        train_stats = train_one_epoch(
-            model=model,
-            criterion=criterion,
-            data_loader=data_loader_train,
-            optimizer=optimizer,
-            device=device,
-            epoch=epoch,
-            loss_scaler=loss_scaler,
-            max_norm=args.clip_grad,
-            model_ema=model_ema,
-            mixup_fn=mixup_fn,
-            check=check,
-            update_freq=1,
-            update_batches=1,
-            stats = stats,
-            scoring_type = "Conductance_alt",
-            same_batch = False,
-            help_par = 1,
-            noisy_score = False,
-            noisy_dropout = False,
-            update_data_loader = None,
-            output_dir=output_dir,
-            min_dropout=args.min_dropout,
-            alt_attention_cond=False,
-            mask_type=args.mask_type,
-        )
-        lr_scheduler.step(epoch)
-        epoch_time = time.time() - epoch_start_time
-        cumulative_train_time += epoch_time
-
-        test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        test_acc = test_stats.get('acc1', 0.0)
-        test_loss = test_stats.get('loss', 0.0)
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
         
-        if check and stats:
-            if hasattr(model, 'module'):
-                model.module.update_progression(output_dir / 'plots')
-                model.module.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.module.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.module.clear_progression()
-            else:
-                model.update_progression(output_dir / 'plots')
-                model.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.clear_progression()
+        model.load_state_dict(checkpoint['model'])
+
+        if args.model_ema:
+            utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+        history = checkpoint.get('history', {})
+        if history:
+            for i, drop in enumerate(model.drop_list):
+                drop_history = history.get(f'drop{i}', {})
+                drop.progression_keep = drop_history.get('progression_keep', [])
+                drop.progression_scoring = drop_history.get('progression_scoring', [])
+        
+        best_loss = checkpoint.get('lowest_loss', float('inf'))
+        #cumulative_train_time = checkpoint.get('train_time', 0.0)
+        best_acc = checkpoint.get('best_acc', 0.0)
+    except Exception as e:
+        print(f"Failed to resume from checkpoint: {e}")
+        raise RuntimeError(f"Failed to resume from checkpoint: {e}")
+    
+           
+
+    for i,block in enumerate(model.blocks):
+        model.selected_layers[i*4 + 1] = block.norm2
+
+    for i in range(len(model.blocks)-1):
+        model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
+    model.eval()
+
+
+    # 2) prepare a single test image
+
+
+    # if your dataset returns a Tensor, convert to PIL:
+    if isinstance(img_sample, torch.Tensor):
+        img_pil = T.ToPILImage()(img_sample)
+    else:
+        img_pil = img_sample
+    tf = T.Compose([
+        T.Resize(224),
+        T.CenterCrop(224),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485,0.456,0.406],
+                    std=[0.229,0.224,0.225])
+    ])
+    inp = tf(img_pil).unsqueeze(0).requires_grad_()
+    
+    baseline = torch.zeros_like(inp)
+
+    # 3) compute conductance + IG
+    from captum.attr import LayerConductance 
+    label_tensor = torch.tensor([label_sample], dtype=torch.long, device=inp.device)
+
+    cond = MultiLayerConductance(model.crit_for,  model.selected_layers)
+    layer_attr, input_attr, delta = cond.attribute(
+        inp,
+        baselines=baseline,
+        #target=label_sample,           # e.g. “bull mastiff”
+        n_steps=5,
+        additional_forward_args=(label_tensor,),
+        return_convergence_delta=True,
+        return_input_attributions=True,
+    )
+    # cond = MultiLayerConductance(model,  model.selected_layers)
+    # layer_attr, input_attr, delta = cond.attribute(
+    #     inp,
+    #     baselines=baseline,
+    #     target=label_sample,           # e.g. “bull mastiff”
+    #     n_steps=5,
+    #     return_convergence_delta=True,
+    #     return_input_attributions=True,
+    #     method="riemann_trapezoid",
+    # )
+    for i, attr in enumerate(layer_attr):
+        if i<5:
+            simple_layer_cond = LayerConductance(model, model.selected_layers[i])
+            lc_attr, lc_delta = simple_layer_cond.attribute(
+                inp, baselines=baseline, n_steps=5,target=label_sample,
+                return_convergence_delta=True,method="riemann_trapezoid",
+)
+            print(f"Layer {i+1} conductance shape:", attr.shape)
+            print(f"Layer {i+1} conductance:", attr.sum().item())
+            # print(f"Layer {i+1} conductance (normalized):", attr.sum().item() / inp.numel())
+            print(f"Layer {i+1} conductance (mean),variance(var):", attr.mean().item(), attr.var().item())
+            print("Convergence δ:", delta[i].item())
+            print("LC attr:", lc_attr.sum().item(),"LC mean:", lc_attr.mean().item(), "LC var:", lc_attr.var().item()," δ:", lc_delta)
+    # print(input_attr[0].shape)
+    # print("Image type:",label_sample)
+    # 4) plot
+    attr_tensor = input_attr[0].squeeze(0).detach()        # [3,224,224], no grad
+         # [3,H,W]
+    heatmap = attr_tensor.abs().sum(0).cpu().numpy()  # [H,W]
+    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+    # 7) convert original to numpy [H,W,3] in [0,1]
+    orig = np.array(img_pil).astype(np.float32) / 255.0
+
+    # 8) plot side‑by‑side
+    h, w = heatmap.shape
+
+# Option A: simple imshow with Reds colormap
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+
+    ax1.imshow(orig)
+    ax1.set_title("Original")
+    ax1.axis("off")
+
+    ax2.imshow(orig)
+    # overlay only the red channel:
+    ax2.imshow(heatmap, cmap="Reds", alpha=0.6)
+    ax2.set_title("IG as Red Map")
+    ax2.axis("off")
+
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])

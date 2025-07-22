@@ -70,7 +70,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     new_iter = iter(data_loader)
     
 
-    print('check:', check)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
