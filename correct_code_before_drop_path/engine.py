@@ -20,9 +20,6 @@ from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
 from updated_transformer.pruning_indices import calculate_scores,accumulated_scores_uncertainty,select_pruning_indices,expand_prune_indices
 from updated_transformer.pruning_masks import apply_linear_mask,enforce_all_masks,generate_prune_masks_transformer,generate_prune_masks_linear_layers
-#added
-from updated_transformer.dynamic_dropath import update_drop_path_rates
-#added
 import utils
 import json
 import itertools
@@ -48,16 +45,13 @@ def get_random_batch(cached_data, batch_size):
     targets = torch.tensor(targets)
     return images, targets
 
-#added
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
                     output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
-                    noisy_score = False,noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid"
-                    ,ypath = False) -> dict:
-    #added
+                    noisy_score = False,noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid") -> dict:
    
     # TODO fix this for finetuning
     model.train()
@@ -76,12 +70,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     new_iter = iter(data_loader)
     
 
+    # print('check:', check)
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-
         #print('batch_idx:', batch_idx)
         with torch.amp.autocast('cuda'):
             if check and (batch_idx % update_freq == 0):
@@ -97,8 +91,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     target_chunks = bt.split(32)
                     nb = min(update_batches, len(sample_chunks))
                     next_batches = [(sample_chunks[i], target_chunks[i]) for i in range(nb)]
-                    #next_batches = [(bs.clone(), bt.clone()) for _ in range(update_batches)]
-
                 else:
                     next_batches = []
                     for _ in range(update_batches):
@@ -110,84 +102,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         next_batches.append((sub_samples, sub_targets))
                 # Now, get the next "update_batches" batches from the peek iterator.
                 #model.calculate_scores(next_batches,device,stats=stats)
-                
                 if mask_type == "sigmoid":
                     sm = False
                 else:
                     sm = True
-                #added
-                if not ypath:
-                    if hasattr(model, 'module'):
-                        model.module.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
-                                        noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
-                    else:
-                        model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
-                                        noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
+                if hasattr(model, 'module'):
+                    model.module.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
+                                       noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
                 else:
-                    if hasattr(model, 'module'):
-                        _,means = calculate_scores(model.module,
-                                            next_batches, device, scoring_type=scoring_type, transformer=False,
-                                            normalization=False, sm=sm, selected_layers=model.module.ypath_layers)
-                    else:
-                        _,means = calculate_scores(model,
-                                            next_batches, device, scoring_type=scoring_type, transformer=False,
-                                            normalization=False, sm=sm, selected_layers=model.ypath_layers)
-                    
-                    elasticity = model.module.elasticity if hasattr(model, 'module') else model.elasticity
-                    drop_path_rate = model.module.drop_path_rate if hasattr(model, 'module') else model.drop_path_rate
-                    
-                    # #initialize seperate arrays
-                    # means_torch = torch.stack([
-                    #     torch.tensor(m, device=device) for m in means
-                    # ], dim=0)
-                    # attn_means = means_torch[0::2]
-                    # mlp_means  = means_torch[1::2]
-                    # attn_rates = ypath_rates[0::2]
-                    # mlp_rates  = ypath_rates[1::2]
+                    model.calculate_scores(next_batches,device,stats=stats,scoring_type=scoring_type,noisy_score= noisy_score,
+                                       noisy_dropout = noisy_dropout,min_dropout=min_dropout,alt_attention_cond = alt_attention_cond,sm = sm)
 
-                    # # 2) compute your new keep-rates
-                    # attn_new = update_drop_path_rates(attn_means, attn_rates,
-                    #                                 elasticity=elasticity,
-                    #                                 drop_rate=drop_path_rate,
-                    #                                 mask_type=mask_type,
-                    #                                 min_dropout=min_dropout,
-                    #                                 rescaling_type=None)
-                    # mlp_new  = update_drop_path_rates(mlp_means, mlp_rates,
-                    #                                 elasticity=elasticity,
-                    #                                 drop_rate=drop_path_rate,
-                    #                                 mask_type=mask_type,
-                    #                                 min_dropout=min_dropout,
-                    #                                 rescaling_type=None)
 
-                    # # 3) write them back *in-place* into the same tensor…
-                    # ypath_rates[0::2] = attn_new
-                    # ypath_rates[1::2] = mlp_new
 
-                    # # 4) …and push into your blocks
-                    # for i, block in enumerate(model.module.blocks if hasattr(model, 'module') else model.blocks):
-                    #     block.drop_path1.drop_prob = ypath_rates[2*i]
-                    #     block.drop_path2.drop_prob = ypath_rates[2*i+1]
-                    
-                    means_torch = torch.stack([
-                        torch.tensor(m, device=device) for m in means
-                    ], dim=0)
-
-                    new_rates  = update_drop_path_rates(means_torch,drop_rate=drop_path_rate
-                                                                    ,mask_type=mask_type,min_dropout=min_dropout,
-                                                                rescaling_type=None)
-
-                    for i, block in enumerate(model.module.blocks if hasattr(model, 'module') else model.blocks):
-                        print(f"Block {i} - attn")
-                        block.drop_path1.update_params(drop_prob=new_rates[2*i], elasticity=elasticity,curr =False)
-                        print(f"Block {i} - mlp")
-                        block.drop_path2.update_params(drop_prob=new_rates[2*i+1], elasticity=elasticity,curr = False)
-                    
-                    # for i, block in enumerate(model.module.blocks if hasattr(model, 'module') else model.blocks):
-                    #     print(f"Block {i} - attn")
-                    #     block.drop_path1.update_params(drop_prob=new_rates[i], elasticity=elasticity,curr =False)
-                    #     print(f"Block {i} - mlp")
-                    #     block.drop_path2.update_params(drop_prob=new_rates[i], elasticity=elasticity,curr = False)
-                #added
             outputs = model(samples)
             loss = criterion(outputs, targets)
             #if stats and batch_idx % 350 == 0:
@@ -195,6 +122,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
               #  model.plot_current_stats(epoch+1,batch_idx, epoch_dir)
 
+                
+            
 
 
         loss_value = loss.item()
@@ -275,7 +204,7 @@ def prune_and_train(model: torch.nn.Module, criterion: torch.nn.Module,
                     update_freq:int=1,update_batches:int =5, update_data_loader= None,
                     output_dir: str = None,scoring_type:str ="Conductance",normalization:bool = True,transformer:bool = False,
                     uncertainty:bool = False,w_avg_rate : float = 0.05,pruning_rate: float = 0.2, 
-                    pruning_type: str = "normalization",next_layer:bool = False,help_par:int =1,ypath_rates = None) -> dict:
+                    pruning_type: str = "normalization",next_layer:bool = False,help_par:int =1,) -> dict:
    
     # TODO fix this for finetuning
     prune_indices = None

@@ -14,8 +14,6 @@ import json
 import random
 from pathlib import Path
 from updated_transformer.plots import plot_epoch_statistics
-from updated_transformer.dynamic_dropath import  DropPath
-
 
 from timm.data import Mixup
 from timm.models import create_model
@@ -42,14 +40,14 @@ def get_args_parser():
     parser.add_argument('--unscale-lr', action='store_true')
 
     # Model parameters
-    parser.add_argument('--model', default='deit_tiny_patch16_224', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--input-size', default=224, type=int, help='images input size')
 
     parser.add_argument('--drop_rate', type=float, default=0.0, metavar='PCT',
                     help='Dropout rate (default: 0.)')
 
-    parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
+    parser.add_argument('--drop-path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
     parser.add_argument('--drop-block', type=float, default=None, metavar='PCT',
                         help='Drop block rate (default: None)')
@@ -206,10 +204,6 @@ def get_args_parser():
                     help='Enable Y-Drop (MyDropout) by default')
     parser.add_argument('--no-ydrop', dest='ydrop', action='store_false',
                     help='Disable Y-Drop (MyDropout)')
-    #added
-    parser.add_argument('--ypath', action='store_true', default=False,
-                    help='Enable Y-Path (MyPath)')
-    #added
 
     parser.add_argument('--elasticity', type=float, default=0.01,
                         help='Elasticity factor for custom dropout')
@@ -233,7 +227,7 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity',"Conductance_alt"], default='Conductance',
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity','Conductance_alt'], default='Conductance',
                         type=str, help='Scoring type for custom dropout')
     parser.add_argument('--same_batch', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
@@ -443,24 +437,23 @@ def main(args):
     if args.alt_attention_cond:
         for i, block in enumerate(model.blocks):
             model.selected_layers[i*4] = block.attn.qkv
+    
+    model.selected_layers = []
+    model.drop_list = []
 
-#### Remove layers portion
-    # model.selected_layers = []
-    # model.drop_list = []
-
-    # for i, block in enumerate(model.blocks):
-    #     block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
-    #     block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
-    #     # model.selected_layers.append(block.attn.attention_identity_layer)
-    #     model.selected_layers.append(block.mlp.fc1)
-    #     if i < len(model.blocks) - 1:
-    #         model.selected_layers.append(model.blocks[i+1].norm1)
-    #     else:
-    #         model.selected_layers.append(block.mlp.fc2)
-    #     # model.drop_list.append(block.attn.attn_drop)
-    #     # model.drop_list.append(block.attn.proj_drop)
-    #     model.drop_list.append(block.mlp.drop1)
-    #     model.drop_list.append(block.mlp.drop2)
+    for i, block in enumerate(model.blocks):
+        block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+        block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout 
+        model.selected_layers.append(block.attn.attention_identity_layer)
+        model.selected_layers.append(block.mlp.fc1)
+        if i < len(model.blocks) - 1:
+            model.selected_layers.append(model.blocks[i+1].norm1)
+        else:
+            model.selected_layers.append(block.mlp.fc2)
+        # model.drop_list.append(block.attn.attn_drop)
+        # model.drop_list.append(block.attn.proj_drop)
+        model.drop_list.append(block.mlp.drop1)
+        model.drop_list.append(block.mlp.drop2)
 
     
     # for i, block in enumerate(model.blocks):
@@ -472,31 +465,6 @@ def main(args):
     #     model.drop_list.append(block.attn.attn_drop)
     #     model.drop_list.append(block.attn.proj_drop)
 
-
-    #added
-    if args.ypath:
-        ypath_layers = []
-        for i, block in enumerate(model.blocks):
-            block.drop_path1 = DropPath(args.drop_path)
-            block.drop_path2 = DropPath(args.drop_path)
-            ypath_layers.append(block.attn)
-            ypath_layers.append(block.mlp)
-            #ypath_layers.append(block)
-        model.ypath_layers = ypath_layers
-    else:
-        model.ypath_layers = None
-    model.drop_path_rate = args.drop_path
-    model.elasticity = args.elasticity
-
-    #added
-    for i, block in enumerate(model.blocks):
-        print(f"Block {i}: {block.attn.attn_drop}, {block.attn.proj_drop}, {block.mlp.drop1}, {block.mlp.drop2}")
-        print(f"Block {i}: {block.norm1}, {block.norm2}, {block.drop_path1}, {block.drop_path2}")
-
-
-
-
-    
 
 
 
@@ -549,10 +517,9 @@ def main(args):
         criterion = SoftTargetCrossEntropy()
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-        model_without_ddp.criter = LabelSmoothingCrossEntropy(smoothing=args.smoothing, reduction='none')
     else:
         criterion = torch.nn.CrossEntropyLoss()
-        model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
+    model_without_ddp.criterion = criterion
     # teacher_model = None
     # if args.distillation_type != 'none':
     #     assert args.teacher_path, 'need to specify teacher-path when using distillation'
@@ -678,15 +645,12 @@ def main(args):
         epoch_start_time = time.time()
         stats = False
 
-        #added
-        if (args.ydrop or args.ypath) and epoch >= args.annealing_factor:
-            if args.ydrop:
-                if hasattr(model, 'module'):
-                    model.module.use_ydrop()
-                else:
-                    model.use_ydrop() 
-        #added
-
+        
+        if args.ydrop and epoch >= args.annealing_factor:
+            if hasattr(model, 'module'):
+                model.module.use_ydrop()
+            else:
+                model.use_ydrop() 
             check = True
             if (epoch+1)%args.plot_freq == 0:
                 stats = True
@@ -706,7 +670,7 @@ def main(args):
         
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-        #added
+
         train_stats = train_one_epoch(
             model=model,
             criterion=criterion,
@@ -732,9 +696,7 @@ def main(args):
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
             mask_type=args.mask_type,
-            ypath= args.ypath,
         )
-        #added
 
         
 
@@ -800,8 +762,8 @@ def main(args):
             patience_counter = 0  # reset early stopping counter
             checkpoint['patience_counter'] = patience_counter
 
-            # if args.output_dir:  
-            #     utils.save_on_master(checkpoint, output_dir / 'best.pth')
+            if args.output_dir:  
+                utils.save_on_master(checkpoint, output_dir / 'best.pth')
         else:
             patience_counter += 1
             checkpoint['patience_counter'] = patience_counter

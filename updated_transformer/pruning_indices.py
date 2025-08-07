@@ -27,10 +27,14 @@ def calculate_scores(
         scoring_type: str = "Conductance",
         transformer: bool = False,
         normalization: bool = True,
+        selected_layers: Optional[List[int]] = None,
         sm = True) -> Dict[int, torch.Tensor]:
     # 1) --- ensure model is in eval mode and gradients are disabled
     torch.cuda.empty_cache()
     model.eval()
+    if selected_layers is  None:
+        selected_layers = model.selected_layers
+
     # 2) --- save original requires_grad settings
     orig_reqs = []
     for p in model.parameters():
@@ -41,24 +45,39 @@ def calculate_scores(
 
     # 3) --- select scoring type for the layers
     if scoring_type == "Conductance":
-        mlc = MultiLayerConductance(model, model.selected_layers)
+        mlc = MultiLayerConductance(model, selected_layers)
+    elif scoring_type == "Conductance_alt":
+        mlc = MultiLayerConductance(model.crit_for,selected_layers)
     elif scoring_type == "Sensitivity":
-        mlc = MultiLayerSensitivity(model, model.selected_layers)
+        mlc = MultiLayerSensitivity(model,selected_layers)
     else:
         print("Invalid scoring type. Using Conductance as default.")
-        mlc = MultiLayerConductance(model, model.selected_layers)
+        mlc = MultiLayerConductance(model, selected_layers)
 
     # 4) --- iterate over batches
-    for x, _ in batches:
+    for x, y_batch in batches:
             # 5) --- ensure x is on the correct device and requires_grad
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
+            y_batch = y_batch.to(device, non_blocking=True).long()
+
             # 6) --- forward pass and predict labels
             outputs = model(x_captum)
             pred = outputs.argmax(dim=1)
             # 7) --- compute captum attributes
-            captum_out = mlc.attribute(
+            if scoring_type == "Conductance_alt":
+                captum_out = mlc.attribute(
+                    x_captum, baselines=baseline, target=None,
+                    n_steps=model.n_steps,
+                    internal_batch_size=None,
+                    additional_forward_args=(y_batch,),
+                    return_convergence_delta=False,
+                    attribute_to_layer_input=False,
+                    grad_kwargs={"retain_graph": False},
+                )
+            else:
+                captum_out = mlc.attribute(
                 x_captum, baselines=baseline, target=pred,
                 n_steps=model.n_steps,
                 internal_batch_size=None,

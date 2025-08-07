@@ -13,8 +13,8 @@ import torch.nn.functional as F
 
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
-from timm.layers import PatchEmbed,use_fused_attn, trunc_normal_ #,DropPath
-from updated_transformer.dynamic_dropath import  DropPath
+from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
+
 from updated_transformer.mlp import Mlp
 from updated_transformer.attention import Attention
 

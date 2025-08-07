@@ -58,7 +58,7 @@ class Mlp(nn.Module):
         self.act = act_layer()
         #print(self.fc1)
         if ydrop is True:
-            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.act, mask_type=mask_type, scaler=scaler,
+            self.drop1 = MyDropout(elasticity=elasticity, p=drop_probs[0], tied_layer=self.fc1, mask_type=mask_type, scaler=scaler,
                                     transformer_mean=transformer_mean,rescaling_type=rescaling_type)
         else:
             self.drop1 = nn.Dropout(drop_probs[0])

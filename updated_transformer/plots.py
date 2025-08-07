@@ -7,8 +7,7 @@
 import torch
 import torch.nn as nn
 from functools import partial
-from torch.jit import Final
-from typing import Type, Optional
+#from typing import Type, Optional
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +17,7 @@ import glob
 
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
-from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
+#from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
 def plot_epoch_statistics(base_path, epoch, save_dir=None,block =False):
     """
