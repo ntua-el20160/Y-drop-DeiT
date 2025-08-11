@@ -30,7 +30,6 @@ def calculate_scores(
         selected_layers: Optional[List[int]] = None,
         sm = True) -> Dict[int, torch.Tensor]:
     # 1) --- ensure model is in eval mode and gradients are disabled
-    torch.cuda.empty_cache()
     model.eval()
     if selected_layers is  None:
         selected_layers = model.selected_layers
@@ -128,11 +127,37 @@ def calculate_scores(
     # 12) --- restore original requires_grad settings
     for p, req in zip(model.parameters(), orig_reqs):
             p.requires_grad_(req)
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
 
     model.train()
     return new_scores,means
+
+def update_dropout_masks(
+    model: torch.nn.Module,
+    scores: Dict[int, torch.Tensor],
+    drop_list = None,
+    alt_attention_cond: bool = False,
+    stats: bool = False,
+    min_dropout: float = 0.0,
+    noisy_dropout: bool = False
+):
+    if drop_list is None:
+        drop_list = model.drop_list
+
+    for i, drop_layer in enumerate(drop_list):
+        score = scores[i]
+
+        if alt_attention_cond and (i % 4 == 0):
+            N = score.shape[0]  # Number of tokens
+            qkv = score.reshape(N, 3, model.blocks[i // 4].attn.num_heads, model.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
+            q, k, v = qkv.unbind(0)
+            q, k = model.blocks[i // 4].attn.q_norm(q), model.blocks[i // 4].attn.k_norm(k)
+            q = q * model.blocks[i // 4].attn.scale
+            score = q @ k.transpose(-2, -1)
+
+            
+        drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)
 
 def accumulated_scores_uncertainty(
         acc_scores: Dict[int, torch.Tensor] = None,

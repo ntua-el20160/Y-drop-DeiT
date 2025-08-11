@@ -15,6 +15,7 @@ import random
 from pathlib import Path
 from updated_transformer.plots import plot_epoch_statistics
 from updated_transformer.dynamic_dropath import  DropPath
+import copy as _copy
 
 
 from timm.data import Mixup
@@ -318,9 +319,16 @@ def main(args):
     step_size = round(effective_epochs / args.update_scaling_steps)
     denom = max(1, args.update_scaling_steps - 1) 
 
+    dataset_train_clean = _copy.copy(dataset_train)
+    dataset_train_clean.transform = dataset_val.transform
+
     if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
+
+        sampler_train_clean = torch.utils.data.DistributedSampler(
+        dataset_train_clean, num_replicas=num_tasks, rank=global_rank, shuffle=True
+        )
         if args.repeated_aug:
             sampler_train = RASampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
@@ -341,9 +349,18 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_train_clean = torch.utils.data.SequentialSampler(dataset_train_clean)
+
 
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+    data_loader_train_clean = torch.utils.data.DataLoader(
+        dataset_train_clean, sampler=sampler_train_clean,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
@@ -368,14 +385,7 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-#     model = create_model(
-#     args.model,
-#     pretrained=False,
-#     num_classes=args.nb_classes,
-#     drop=args.drop,
-#     drop_path_rate=args.drop_path,
-#     drop_block_rate=args.drop_block,
-# )
+
     print(f"Creating model: {args.model}")
 
     model = create_model(
@@ -494,13 +504,6 @@ def main(args):
         print(f"Block {i}: {block.norm1}, {block.norm2}, {block.drop_path1}, {block.drop_path2}")
 
 
-
-
-    
-
-
-
-
     # TODO: finetuning
 
     model.to(device)
@@ -517,15 +520,6 @@ def main(args):
             decay=args.model_ema_decay,
             device=ema_device,
             resume='')
-    # if args.model_ema:
-    # # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
-    #    ema_device = 'cpu' if args.model_ema_force_cpu else device
-    #    model_ema = ModelEma(
-    #        model,
-    #        decay=args.model_ema_decay,
-    #        device=ema_device,
-    #        resume=''
-    #  )
 
 
     model_without_ddp = model
@@ -725,7 +719,6 @@ def main(args):
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
             help_par = 1,
-            noisy_score = args.noisy_score,
             noisy_dropout = args.noisy_dropout,
             update_data_loader = cached_subdataset,
             output_dir=output_dir,
@@ -733,6 +726,8 @@ def main(args):
             alt_attention_cond=args.alt_attention_cond,
             mask_type=args.mask_type,
             ypath= args.ypath,
+            support_loader=data_loader_train_clean,
+            conductance_batch_size =64
         )
         #added
 
