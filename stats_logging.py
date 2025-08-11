@@ -288,7 +288,7 @@ def _plot_maxgap(x: np.ndarray, out_png: str, title: str):
     if x.size == 0:
         return
     xs = np.sort(x)[::-1]
-    gaps = xs[0] - xs
+    gaps = xs - xs[0]
     plt.figure()
     plt.plot(np.arange(xs.size), gaps)
     plt.xlabel("Ranked neuron (0=max)"); plt.ylabel("Gap from max"); plt.title(title)

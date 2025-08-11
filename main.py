@@ -742,7 +742,6 @@ def main(args):
             help_par = 1,
             noisy_dropout = args.noisy_dropout,
             update_data_loader = cached_subdataset,
-            output_dir=output_dir,
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
             mask_type=args.mask_type,
