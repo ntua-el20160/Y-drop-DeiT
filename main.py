@@ -256,6 +256,8 @@ def get_args_parser():
                     help='Method to rescale the the limits of the dropout masks')
     parser.add_argument('--stats', action='store_true', default=False,
                         help='Enable statistics logging')
+    parser.add_argument('--conductance_batch_size', type=int, default=32,
+                        help='Batch size for conductance calculation')
     return parser
 
 
@@ -746,7 +748,7 @@ def main(args):
             mask_type=args.mask_type,
             ypath= args.ypath,
             support_loader=data_loader_train_clean,
-            conductance_batch_size =64
+            conductance_batch_size =args.conductance_batch_size
         )
 
         
