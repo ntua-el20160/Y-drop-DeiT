@@ -16,6 +16,7 @@ from pathlib import Path
 from updated_transformer.plots import plot_epoch_statistics
 from updated_transformer.dynamic_dropath import  DropPath
 import copy as _copy
+import os
 
 
 from timm.data import Mixup
@@ -33,7 +34,7 @@ from samplers import RASampler
 import models
 import utils
 #import models_v2
-
+from stats_logging import StreamingConductanceEpochTracker,build_reports
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
@@ -253,7 +254,8 @@ def get_args_parser():
                 help='Calculate conductance after normalization')
     parser.add_argument('--rescaling_type',choices=['linear','piecewise', 'power_law'], default=None, type =str,
                     help='Method to rescale the the limits of the dropout masks')
-    
+    parser.add_argument('--stats', action='store_true', default=False,
+                        help='Enable statistics logging')
     return parser
 
 
@@ -666,26 +668,42 @@ def main(args):
             model.use_normal_dropout() 
 
     check = False
-    import os
+    if args.stats:
+        stats_dir = os.path.join(output_dir, "stats")
+        stats_dir2 = os.path.join(output_dir, "stats_minmax")
+
+        tracker = StreamingConductanceEpochTracker(
+            output_dir=stats_dir,
+            transformer=True,   # or False
+            block_mod=4,        # your 4-layers-per-block rule
+            cv_mode="signed",
+            sign_eps=0.0
+        )
+        tracker_post_minmax = StreamingConductanceEpochTracker(
+            output_dir=stats_dir2,
+            transformer=True,   # or False
+            block_mod=4,        # your 4-layers-per-block rule
+            cv_mode="signed",
+            sign_eps=0.0
+        )
+    else:
+        tracker = None
+        tracker_post_minmax = None
+
     for epoch in range(saved_epoch, args.epochs):
-
+        if args.stats:
+            tracker.begin_epoch(epoch)
+            tracker_post_minmax.begin_epoch(epoch)
         epoch_start_time = time.time()
-        stats = False
-
-        #added
+        
         if (args.ydrop or args.ypath) and epoch >= args.annealing_factor:
+            
             if args.ydrop:
                 if hasattr(model, 'module'):
                     model.module.use_ydrop()
                 else:
                     model.use_ydrop() 
-        #added
-
             check = True
-            if (epoch+1)%args.plot_freq == 0:
-                stats = True
-                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
-                os.makedirs(epoch_dir, exist_ok=True)
 
             if args.update_scaling!='no':
                 i = (epoch - args.annealing_factor) // step_size
@@ -700,7 +718,8 @@ def main(args):
         
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-        #added
+            data_loader_train_clean.sampler.set_epoch(epoch)
+    
         train_stats = train_one_epoch(
             model=model,
             criterion=criterion,
@@ -715,7 +734,7 @@ def main(args):
             check=check,
             update_freq=update_freq,
             update_batches=args.update_batches,
-            stats = stats,
+            tracker = [tracker, tracker_post_minmax],
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
             help_par = 1,
@@ -729,7 +748,6 @@ def main(args):
             support_loader=data_loader_train_clean,
             conductance_batch_size =64
         )
-        #added
 
         
 
@@ -743,22 +761,24 @@ def main(args):
         test_acc = test_stats.get('acc1', 0.0)
         test_loss = test_stats.get('loss', 0.0)
         
-        if check and stats:
-            if hasattr(model, 'module'):
-                model.module.update_progression(output_dir / 'plots')
-                model.module.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.module.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.module.clear_progression()
-            else:
-                model.update_progression(output_dir / 'plots')
-                model.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.clear_progression()
+        # if check and stats:
+        #     if hasattr(model, 'module'):
+        #         model.module.update_progression(output_dir / 'plots')
+        #         model.module.plot_progression_statistics(output_dir / 'plots',label = "")
+        #         model.module.save_statistics(epoch_dir)
+        #         plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
+        #         model.module.clear_progression()
+        #     else:
+        #         model.update_progression(output_dir / 'plots')
+        #         model.plot_progression_statistics(output_dir / 'plots',label = "")
+        #         model.save_statistics(epoch_dir)
+        #         plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
+        #         model.clear_progression()
 
+        if args.stats:
+            tracker.end_epoch()
+            tracker_post_minmax.end_epoch()
 
-        
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
             best_epoch = epoch + 1
@@ -830,7 +850,21 @@ def main(args):
 
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
-        
+    if args.stats:
+        build_reports(
+            output_dir=stats_dir,
+            transformer=True,   # must match how you named the layers
+            block_mod=4,
+            cv_mode="signed",
+            bins=200
+        )
+        build_reports(
+            output_dir=stats_dir2,
+            transformer=True,   # must match how you named the layers
+            block_mod=4,
+            cv_mode="signed",
+            bins=200
+        )
 
 
 if __name__ == '__main__':

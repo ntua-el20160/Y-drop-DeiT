@@ -14,18 +14,31 @@ def _to_1d_numpy(x: torch.Tensor) -> np.ndarray:
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
+def _mad_fast(x):
+    """
+    Mean absolute difference (MAD) = average of |xi - xj|.
+    Computed in O(n log n) using a sorted-sum identity.
+    """
+    n = x.size
+    if n == 0:
+        return float("nan")
+    xs = np.sort(x)
+    i = np.arange(1, n + 1)
+    total_abs_diff = 2.0 * np.sum(xs * (2*i - n - 1))
+    return total_abs_diff / (n**2)
+
 def gini_signed(x: np.ndarray) -> float:
-    y = np.abs(x).astype(np.float64)
-    n = y.size
-    if n == 0: return float("nan")
-    s = y.sum()
-    if s <= 0: return 0.0
-    y_sorted = np.sort(y)
-    i = np.arange(1, n+1)
-    g = 1.0 + 1.0/n - 2.0 * np.sum((n + 1 - i) * y_sorted) / (n * s)
+    # =0 perfectly equal, # =1 one neuron dominates
+    x = np.asarray(x, dtype=np.float64).ravel()
+    mabs = np.mean(np.abs(x))
+    if mabs == 0:
+        return 0.0
+    g  = _mad_fast(x) / (2.0 * mabs)
+
     return float(g)
 
 def skewness_sample(x: np.ndarray) -> float:
+    # <0 very few large values, >0 very few small values, =0 symmetric
     x = x.astype(np.float64)
     n = x.size
     if n < 3: return float("nan")
@@ -139,7 +152,7 @@ class StreamingConductanceEpochTracker:
                 continue
             st = self._state[layer]
             cnt = self._counts[layer] + 1
-
+ 
             # Welford update (vectorized)
             mean_prev = st["mean"]
             delta = v - mean_prev
@@ -240,7 +253,7 @@ def _basic_stats(x: np.ndarray, cv_mode: str, eps: Optional[float], tau: Optiona
     cv = coeff_variation_signed_or_abs(x, cv_mode)
     skew = skewness_sample(x)
     g = gini_signed(x)
-    pct_silent, pct_sat, eps_used, tau_used = _silent_saturated(x, eps, tau, eps_q, tau_q)
+    #pct_silent, pct_sat, eps_used, tau_used = _silent_saturated(x, eps, tau, eps_q, tau_q)
     return {
         "mean": float(np.mean(x)) if x.size else float("nan"),
         "median": float(np.median(x)) if x.size else float("nan"),
@@ -250,10 +263,10 @@ def _basic_stats(x: np.ndarray, cv_mode: str, eps: Optional[float], tau: Optiona
         "p5": float(p5), "p95": float(p95),
         "skewness": float(skew),
         "gini": float(g),
-        "pct_silent": float(pct_silent),
-        "pct_saturated": float(pct_sat),
-        "eps_used": float(eps_used),
-        "tau_used": float(tau_used),
+        # "pct_silent": float(pct_silent),
+        # "pct_saturated": float(pct_sat),
+        # "eps_used": float(eps_used),
+        # "tau_used": float(tau_used),
         "n": int(x.size),
     }
 
@@ -330,9 +343,9 @@ def build_reports(output_dir: str,
             basic_log_lines.append(f"[{name}] n={stats['n']}\n"
                                    f" mean={stats['mean']:.6f}  median={stats['median']:.6f}  variance={stats['variance']:.6f}\n"
                                    f" IQR={stats['IQR']:.6f}  CV={stats['CV']:.6f}  p5={stats['p5']:.6f}  p95={stats['p95']:.6f}\n"
-                                   f" skewness={stats['skewness']:.6f}  gini(|x|)={stats['gini']:.6f}\n"
-                                   f" %silent(|x|<ε)={stats['pct_silent']:.2f}%  %saturated(|x|>τ)={stats['pct_saturated']:.2f}%"
-                                   f"  ε={stats['eps_used']:.6g}  τ={stats['tau_used']:.6g}\n")
+                                   f" skewness={stats['skewness']:.6f}  gini(|x|)={stats['gini']:.6f}\n")
+                                #    f" %silent(|x|<ε)={stats['pct_silent']:.2f}%  %saturated(|x|>τ)={stats['pct_saturated']:.2f}%"
+                                #    f"  ε={stats['eps_used']:.6g}  τ={stats['tau_used']:.6g}\n")
 
             # within-epoch dynamics
             mad = np.load(os.path.join(lay_dir, "per_neuron_mean_abs_diff.npy"))

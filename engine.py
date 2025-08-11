@@ -53,7 +53,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable,support_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
-                    update_freq:int=1,update_batches:int =5, stats: bool = False, update_data_loader= None,
+                    update_freq:int=1,update_batches:int =5, tracker =None, update_data_loader= None,
                     output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
                     noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid"
                     ,ypath = False,conductance_batch_size:int = 32) -> dict:
@@ -66,7 +66,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
-
+    if tracker is not None:
+        tracker_normal = tracker[0]
+        tracker_minmax = tracker[1]
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
     #new_iter = iter(data_loader)
@@ -87,7 +89,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         #print('batch_idx:', batch_idx)
         with torch.amp.autocast('cuda'):
-            if check and (batch_idx % update_freq == 0):
+            #if check and (batch_idx % update_freq == 0):
+            if check or (tracker is not None):
                 # Get the next update_batches batches.
                 if update_data_loader == None:
                     next_batches = []
@@ -130,7 +133,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     scores,means = calculate_scores(model,
                                         next_batches, device, scoring_type=scoring_type, transformer=False,
                                         normalization=False, sm=sm, selected_layers=selected_layers)
-                if ypath:
+                
+                if tracker is not None:
+                    tracker_normal.update(scores)
+                    scores_min_max = {}
+                    for i,scor in scores.items():
+                        sf = -scor
+                        epsilon = torch.finfo(sf.dtype).eps
+                        s_min, s_max = sf.min(), sf.max()
+                        normalized = 2 * (sf - s_min) / (s_max - s_min + epsilon) - 1
+                        scores_min_max[i] = normalized
+                    tracker_minmax.update(scores_min_max)
+
+                if ypath and check and (batch_idx % update_freq == 0):
                     elasticity = model.module.elasticity if hasattr(model, 'module') else model.elasticity
                     drop_path_rate = model.module.drop_path_rate if hasattr(model, 'module') else model.drop_path_rate
                     means_torch = torch.stack([
@@ -145,19 +160,15 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         block.drop_path1.update_params(drop_prob=new_rates[2*i], elasticity=elasticity,curr =False)
                         print(f"Block {i} - mlp")
                         block.drop_path2.update_params(drop_prob=new_rates[2*i+1], elasticity=elasticity,curr = False)
-                else:
+                elif check and (batch_idx % update_freq == 0):
                     update_dropout_masks(model = model.module if hasattr(model, 'module') else model,
                                         scores=scores, drop_list=None,
                                         min_dropout=min_dropout, noisy_dropout=noisy_dropout,
-                                        stats=stats, alt_attention_cond=alt_attention_cond,)
+                                        stats=False, alt_attention_cond=alt_attention_cond,)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
-            #if stats and batch_idx % 350 == 0:
-             #   epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data","images")
-
-              #  model.plot_current_stats(epoch+1,batch_idx, epoch_dir)
-
+          
 
 
         loss_value = loss.item()
