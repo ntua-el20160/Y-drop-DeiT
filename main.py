@@ -405,7 +405,7 @@ def main(args):
     elasticity=args.elasticity,
     scaler=args.scaler,
     n_steps=args.n_steps,
-    transformer_mean=args.transformer_mean,
+    transformer_mean=False,
     rescaling_type=args.rescaling_type,
 )
                     
@@ -748,7 +748,8 @@ def main(args):
             mask_type=args.mask_type,
             ypath= args.ypath,
             support_loader=data_loader_train_clean,
-            conductance_batch_size =args.conductance_batch_size
+            conductance_batch_size =args.conductance_batch_size,
+            trans_mean = args.transformer_mean
         )
 
         

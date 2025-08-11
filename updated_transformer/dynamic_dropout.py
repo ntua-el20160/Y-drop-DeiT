@@ -170,10 +170,7 @@ class MyDropout(nn.Module):
         # epsilon = 1e-6
         # s_min, s_max = scoring.min(), scoring.max()
         # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
-        if self.transformer_mean:
-            scoring_final = scoring.sum(dim =0)
-        else:
-            scoring_final = scoring
+        scoring_final = scoring
         self.scoring.copy_(scoring_final)
         #Different mask types
         if self.mask_type == "sigmoid":

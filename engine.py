@@ -54,7 +54,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, tracker =None, update_data_loader= None,
-                    output_dir: str = None,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
+                    trans_mean=False,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
                     noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid"
                     ,ypath = False,conductance_batch_size:int = 32) -> dict:
     #added
@@ -127,11 +127,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
                 if hasattr(model, 'module'):
                     scores,means = calculate_scores(model.module,
-                                        next_batches, device, scoring_type=scoring_type, transformer=False,
+                                        next_batches, device, scoring_type=scoring_type, transformer=trans_mean,
                                         normalization=False, sm=sm, selected_layers=selected_layers)
                 else:
                     scores,means = calculate_scores(model,
-                                        next_batches, device, scoring_type=scoring_type, transformer=False,
+                                        next_batches, device, scoring_type=scoring_type, transformer=trans_mean,
                                         normalization=False, sm=sm, selected_layers=selected_layers)
                 
                 if tracker is not None:

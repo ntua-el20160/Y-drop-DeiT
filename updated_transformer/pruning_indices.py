@@ -102,7 +102,7 @@ def calculate_scores(
                 else:
                     score_mean = score.mean(dim=0)
                 if transformer:
-                    score_mean = score_mean.sum(dim =0)
+                    score_mean = score_mean.mean(dim =0)
 
                 if i not in new_scores:
                     # First time: initialize with the computed score_mean
