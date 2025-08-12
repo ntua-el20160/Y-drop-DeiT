@@ -251,8 +251,7 @@ def _silent_saturated(x: np.ndarray,
     pct_sat = (ax > tau).mean()*100.0 if ax.size else float("nan")
     return pct_silent, pct_sat, eps, tau
 
-def _basic_stats(x: np.ndarray, cv_mode: str, eps: Optional[float], tau: Optional[float],
-                 eps_q: float, tau_q: float) -> Dict[str, float]:
+def _basic_stats(x: np.ndarray, cv_mode: str) -> Dict[str, float]:
     q25, q75 = np.quantile(x, [0.25, 0.75]) if x.size else (float("nan"), float("nan"))
     p5, p95 = np.percentile(x, [5, 95]) if x.size else (float("nan"), float("nan"))
     cv = coeff_variation_signed_or_abs(x, cv_mode)
@@ -427,8 +426,7 @@ def build_reports(output_dir: str,
             lay_dir = os.path.join(ep_dir, name)
             mean = np.load(os.path.join(lay_dir, "per_neuron_mean.npy"))
             # (1)–(9)
-            stats = _basic_stats(mean, cv_mode=cv_mode, eps=eps, tau=tau,
-                                 eps_q=eps_q, tau_q=tau_q)
+            stats = _basic_stats(mean, cv_mode=cv_mode)
             basic_log_lines.append(f"[{name}] n={stats['n']}\n"
                                    f" mean={stats['mean']:.6f}  median={stats['median']:.6f}  variance={stats['variance']:.6f}\n"
                                    f" IQR={stats['IQR']:.6f}  CV={stats['CV']:.6f}  p5={stats['p5']:.6f}  p95={stats['p95']:.6f}\n"
