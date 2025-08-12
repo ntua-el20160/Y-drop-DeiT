@@ -319,6 +319,17 @@ def _wasserstein_1d(x: np.ndarray, y: np.ndarray) -> float:
         if rx <= 1e-18: i += 1; rx = wx
         if ry <= 1e-18: j += 1; ry = wy
     return float(dist)
+
+def _plot_timeseries_single(metric_name: str,
+                            epochs: List[int],
+                            values: List[float],
+                            out_png: str,
+                            title: str):
+    plt.figure()
+    plt.plot(epochs, values, marker="o", linestyle="-")
+    plt.xlabel("Epoch"); plt.ylabel(metric_name); plt.title(title)
+    plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
+
 def _plot_timeseries(metric_name: str,
                      epochs_A: List[int], values_A: List[float], label_A: str,
                      epochs_B: List[int], values_B: List[float], label_B: str,
@@ -473,6 +484,45 @@ def build_reports(output_dir: str,
             with open(os.path.join(ep_dir, "stats_epoch_compare.txt"), "w") as f:
                 f.write("=== BETWEEN-EPOCH COMPARISON (11: avg diff, 12: Spearman ρ_s) ===\n")
                 f.writelines(cmp_log_lines)
+    layer_epoch_means: Dict[str, Dict[int, np.ndarray]] = _read_layer_means(output_dir)
+
+    timeseries_root = os.path.join(output_dir, "timeseries")
+    _ensure_dir(timeseries_root)
+
+    metrics_to_plot = ["mean", "median", "variance", "IQR", "CV", "p5", "p95", "skewness", "gini"]
+    # collect rows for CSV: (layer, epoch, metric, value)
+    ts_rows: List[Tuple[str, int, str, float]] = []
+
+    for layer, ep2vec in layer_epoch_means.items():
+        lay_ts_dir = os.path.join(timeseries_root, layer)
+        _ensure_dir(lay_ts_dir)
+
+        ep_list = sorted(ep2vec.keys())
+        # Precompute stats per epoch once
+        stats_per_epoch: Dict[int, Dict[str, float]] = {}
+        for e in ep_list:
+            stats_per_epoch[e] = _basic_stats(ep2vec[e], cv_mode=cv_mode)
+
+        for metric in metrics_to_plot:
+            vals = [stats_per_epoch[e][metric] for e in ep_list]
+            out_png = os.path.join(lay_ts_dir, f"timeseries_{metric}.png")
+            _plot_timeseries_single(metric_name=metric,
+                                    epochs=ep_list,
+                                    values=vals,
+                                    out_png=out_png,
+                                    title=f"{layer} – {metric} over epochs")
+            # CSV rows
+            for e, v in zip(ep_list, vals):
+                ts_rows.append((layer, e, metric, v))
+
+    # Write the tidy CSV once
+    csv_path = os.path.join(timeseries_root, "metrics_timeseries.csv")
+    with open(csv_path, "w") as f:
+        f.write("layer,epoch,metric,value\n")
+        for layer, e, metric, v in ts_rows:
+            # handle NaNs cleanly
+            val_str = "nan" if (v is None or (isinstance(v, float) and not np.isfinite(v))) else f"{v}"
+            f.write(f"{layer},{e},{metric},{val_str}\n")
 def _layer_dirs(epoch_dir: str) -> Dict[str, str]:
     """Return mapping layer_name -> layer_dir for an epoch dir."""
     out = {}
