@@ -101,7 +101,7 @@ def calculate_scores(
                     score_mean = score.sum(dim =0)
                 else:
                     score_mean = score.mean(dim=0)
-                if transformer:
+                if transformer and i % 4 != 0:
                     score_mean = score_mean.mean(dim =0)
 
                 if i not in new_scores:

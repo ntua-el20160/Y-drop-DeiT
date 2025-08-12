@@ -6,6 +6,9 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+import argparse
+import os
+import sys
 # ============== small math helpers ==============
 
 def _to_1d_numpy(x: torch.Tensor) -> np.ndarray:
@@ -14,6 +17,8 @@ def _to_1d_numpy(x: torch.Tensor) -> np.ndarray:
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
+def _load_manifest_epochs(root: str) -> List[str]:
+    return sorted([d for d in os.listdir(root) if d.startswith("epoch_")])
 def _mad_fast(x):
     """
     Mean absolute difference (MAD) = average of |xi - xj|.
@@ -269,7 +274,61 @@ def _basic_stats(x: np.ndarray, cv_mode: str, eps: Optional[float], tau: Optiona
         # "tau_used": float(tau_used),
         "n": int(x.size),
     }
+def _ks_distance(x: np.ndarray, y: np.ndarray) -> float:
+    """Two-sample KS distance without SciPy."""
+    xs = np.sort(x); ys = np.sort(y)
+    nx, ny = xs.size, ys.size
+    i = j = 0
+    cdf_x = cdf_y = 0.0
+    d = 0.0
+    while i < nx and j < ny:
+        if xs[i] <= ys[j]:
+            cdf_x = (i+1)/nx
+            d = max(d, abs(cdf_x - cdf_y))
+            i += 1
+        else:
+            cdf_y = (j+1)/ny
+            d = max(d, abs(cdf_x - cdf_y))
+            j += 1
+    # drain remainder
+    if i < nx:
+        # y is at 1.0 now
+        while i < nx:
+            cdf_x = (i+1)/nx
+            d = max(d, abs(cdf_x - cdf_y))
+            i += 1
+    if j < ny:
+        while j < ny:
+            cdf_y = (j+1)/ny
+            d = max(d, abs(cdf_x - cdf_y))
+            j += 1
+    return float(d)
 
+def _wasserstein_1d(x: np.ndarray, y: np.ndarray) -> float:
+    """Exact 1D Wasserstein-1 (Earth Mover’s) for two samples with equal weights."""
+    xs = np.sort(x).astype(np.float64); ys = np.sort(y).astype(np.float64)
+    nx, ny = xs.size, ys.size
+    if nx == 0 or ny == 0: return np.nan
+    wx, wy = 1.0/nx, 1.0/ny
+    i = j = 0
+    rx = wx; ry = wy   # remaining mass at current atoms
+    dist = 0.0
+    while i < nx and j < ny:
+        moved = min(rx, ry)
+        dist += moved * abs(xs[i] - ys[j])
+        rx -= moved; ry -= moved
+        if rx <= 1e-18: i += 1; rx = wx
+        if ry <= 1e-18: j += 1; ry = wy
+    return float(dist)
+def _plot_timeseries(metric_name: str,
+                     epochs_A: List[int], values_A: List[float], label_A: str,
+                     epochs_B: List[int], values_B: List[float], label_B: str,
+                     out_png: str, title: str):
+    plt.figure()
+    plt.plot(epochs_A, values_A, marker="o", linestyle="-", label=label_A)
+    plt.plot(epochs_B, values_B, marker="o", linestyle="-", label=label_B)
+    plt.xlabel("Epoch"); plt.ylabel(metric_name); plt.title(title); plt.legend()
+    plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
 def _plot_hist(x: np.ndarray, out_png: str, title: str, bins: int = 50):
     plt.figure()
     counts, edges = np.histogram(x, bins=bins)
@@ -283,7 +342,37 @@ def _plot_values_scatter(x: np.ndarray, out_png: str, title: str):
     plt.scatter(np.arange(x.size), x, s=8)
     plt.xlabel("Neuron index"); plt.ylabel("Conductance"); plt.title(title)
     plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
+def _overlay_hist(a: np.ndarray, b: np.ndarray, out_png: str, title: str, bins: int = 50):
+    lo = float(min(a.min() if a.size else 0, b.min() if b.size else 0))
+    hi = float(max(a.max() if a.size else 1, b.max() if b.size else 1))
+    edges = np.linspace(lo, hi, bins+1)
+    ca, _ = np.histogram(a, bins=edges, density=False)
+    cb, _ = np.histogram(b, bins=edges, density=False)
+    centers = (edges[:-1] + edges[1:]) / 2
+    width = np.diff(edges) * 0.45
+    plt.figure()
+    plt.bar(centers - width/2, ca, width=width, alpha=0.6, label="A")
+    plt.bar(centers + width/2, cb, width=width, alpha=0.6, label="B")
+    plt.xlabel("Conductance (signed)"); plt.ylabel("Count"); plt.title(title); plt.legend()
+    plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
 
+def _overlay_scatter(a: np.ndarray, b: np.ndarray, out_png: str, title: str):
+    plt.figure()
+    plt.scatter(np.arange(a.size), a, s=8, label="A")
+    plt.scatter(np.arange(b.size), b, s=8, marker="x", label="B")
+    plt.xlabel("Neuron index"); plt.ylabel("Conductance"); plt.title(title); plt.legend()
+    plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
+
+def _overlay_maxgap(a: np.ndarray, b: np.ndarray, out_png: str, title: str):
+    if a.size == 0 or b.size == 0:
+        return
+    sa = np.sort(a)[::-1]; sb = np.sort(b)[::-1]
+    ga = sa-sa[0]; gb = sb - sb[0]
+    plt.figure()
+    plt.plot(np.arange(ga.size), ga, label="A")
+    plt.plot(np.arange(gb.size), gb, label="B")
+    plt.xlabel("Ranked neuron (0=max)"); plt.ylabel("Gap from max"); plt.title(title); plt.legend()
+    plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
 def _plot_maxgap(x: np.ndarray, out_png: str, title: str):
     if x.size == 0:
         return
@@ -386,3 +475,247 @@ def build_reports(output_dir: str,
             with open(os.path.join(ep_dir, "stats_epoch_compare.txt"), "w") as f:
                 f.write("=== BETWEEN-EPOCH COMPARISON (11: avg diff, 12: Spearman ρ_s) ===\n")
                 f.writelines(cmp_log_lines)
+def _layer_dirs(epoch_dir: str) -> Dict[str, str]:
+    """Return mapping layer_name -> layer_dir for an epoch dir."""
+    out = {}
+    for name in os.listdir(epoch_dir):
+        if name.startswith("layer_") or name.startswith("block_"):
+            p = os.path.join(epoch_dir, name)
+            if os.path.isdir(p): out[name] = p
+    return out
+
+def _read_layer_means(run_dir: str) -> Dict[str, Dict[int, np.ndarray]]:
+    """
+    Returns: {layer_name: {epoch_index: mean_vector}}
+    """
+    result: Dict[str, Dict[int, np.ndarray]] = {}
+    for ep_name in _load_manifest_epochs(run_dir):
+        ep_idx = int(ep_name.split("_")[1])
+        ep_dir = os.path.join(run_dir, ep_name)
+        # manifest guides which layers exist
+        man_path = os.path.join(ep_dir, "manifest.json")
+        if os.path.exists(man_path):
+            with open(man_path, "r") as f:
+                manifest = json.load(f)
+            layers = [l["name"] for l in manifest.get("layers", [])]
+            lay_dirs = {nm: os.path.join(ep_dir, nm) for nm in layers}
+        else:
+            lay_dirs = _layer_dirs(ep_dir)
+        for name, ldir in lay_dirs.items():
+            mean_path = os.path.join(ldir, "per_neuron_mean.npy")
+            if not os.path.exists(mean_path): continue
+            mean = np.load(mean_path)
+            result.setdefault(name, {})[ep_idx] = mean
+    return result
+
+def compare_runs(runA_dir: str, runB_dir: str,
+                 best_epoch_A: Optional[int],
+                 best_epoch_B: Optional[int],
+                 out_dir: str,
+                 metrics_to_plot: Optional[List[str]] = None,
+                 bins: int = 60,
+                 cv_mode: str = "abs",
+                 labelA: str = "A",
+                 labelB: str = "B"):
+    """
+    Build run-to-run comparisons.
+      - Time series of basic stats per layer for both runs
+      - Overlays (hist/scatter/maxgap) for last epoch and user-provided best epochs
+      - Comparison logs (Δmetrics + KS + Wasserstein) for last & best
+
+    metrics_to_plot: subset of ["mean","median","variance","IQR","CV","p5","p95","skewness","gini"]
+    """
+    _ensure_dir(out_dir)
+    A = _read_layer_means(runA_dir)
+    B = _read_layer_means(runB_dir)
+
+    layers_common = sorted(set(A.keys()) & set(B.keys()))
+    if not layers_common:
+        raise RuntimeError("No common layers found between runs.")
+
+    if metrics_to_plot is None:
+        metrics_to_plot = ["mean","median","variance","IQR","CV","p95","skewness","gini"]
+
+    # find last epochs (max) for each run
+    last_epoch_A = max({e for d in A.values() for e in d.keys()})
+    last_epoch_B = max({e for d in B.values() for e in d.keys()})
+
+    # summary logs
+    last_log = []
+    best_log = []
+
+    for layer in layers_common:
+        layer_dir = os.path.join(out_dir, layer)
+        _ensure_dir(layer_dir)
+
+        # --- collect time series of basic stats for each run ---
+        epA = sorted(A[layer].keys())
+        epB = sorted(B[layer].keys())
+        statsA = {m: [] for m in metrics_to_plot}
+        statsB = {m: [] for m in metrics_to_plot}
+
+        for e in epA:
+            s = _basic_stats(A[layer][e], cv_mode=cv_mode)
+            for m in metrics_to_plot: statsA[m].append(s[m])
+        for e in epB:
+            s = _basic_stats(B[layer][e], cv_mode=cv_mode)
+            for m in metrics_to_plot: statsB[m].append(s[m])
+
+        # --- plot time series per metric ---
+        for m in metrics_to_plot:
+            out_png = os.path.join(layer_dir, f"timeseries_{m}.png")
+            _plot_timeseries(
+                metric_name=m,
+                epochs_A=epA, values_A=statsA[m], label_A=labelA,
+                epochs_B=epB, values_B=statsB[m], label_B=labelB,
+                out_png=out_png,
+                title=f"{layer} – {m} over epochs"
+            )
+
+        # --- last-epoch overlays ---
+        a_last = A[layer].get(last_epoch_A)
+        b_last = B[layer].get(last_epoch_B)
+        if a_last is not None and b_last is not None:
+            _overlay_hist(a_last, b_last, os.path.join(layer_dir, "overlay_hist_last.png"),
+                          title=f"{layer} – Histogram (last epochs {labelA}={last_epoch_A}, {labelB}={last_epoch_B})",
+                          bins=bins)
+            _overlay_scatter(a_last, b_last, os.path.join(layer_dir, "overlay_scatter_last.png"),
+                             title=f"{layer} – Value per neuron (last)")
+            _overlay_maxgap(a_last, b_last, os.path.join(layer_dir, "overlay_maxgap_last.png"),
+                            title=f"{layer} – Gap from max (last)")
+
+            sA = _basic_stats(a_last, cv_mode=cv_mode)
+            sB = _basic_stats(b_last, cv_mode=cv_mode)
+            ks = _ks_distance(a_last, b_last)
+            w1 = _wasserstein_1d(a_last, b_last)
+            # pairwise neuron alignment for rank corr (use min length)
+            nmin = min(a_last.size, b_last.size)
+            rho = np.corrcoef(
+                np.argsort(np.argsort(a_last[:nmin])),
+                np.argsort(np.argsort(b_last[:nmin]))
+            )[0,1]
+            last_log.append(
+                f"[{layer}] LAST  {labelA}@{last_epoch_A} vs {labelB}@{last_epoch_B}\n"
+                f" Δmean={sA['mean']-sB['mean']:+.6f}  Δmedian={sA['median']-sB['median']:+.6f}  "
+                f" Δvar={sA['variance']-sB['variance']:+.6f}  ΔIQR={sA['IQR']-sB['IQR']:+.6f}  "
+                f" ΔCV={sA['CV']-sB['CV']:+.6f}  Δp95={sA['p95']-sB['p95']:+.6f}  "
+                f" Δskew={sA['skewness']-sB['skewness']:+.6f}  Δgini={sA['gini']-sB['gini']:+.6f}\n"
+                f" KS={ks:.4f}  W1={w1:.6f}  Spearman ρ_s≈{rho:.4f}\n"
+            )
+
+        # --- best-epoch overlays ---
+        if best_epoch_A is not None and best_epoch_B is not None:
+            a_best = A[layer].get(int(best_epoch_A))
+            b_best = B[layer].get(int(best_epoch_B))
+            if a_best is not None and b_best is not None:
+                _overlay_hist(a_best, b_best, os.path.join(layer_dir, "overlay_hist_best.png"),
+                              title=f"{layer} – Histogram (best {labelA}={best_epoch_A}, {labelB}={best_epoch_B})",
+                              bins=bins)
+                _overlay_scatter(a_best, b_best, os.path.join(layer_dir, "overlay_scatter_best.png"),
+                                 title=f"{layer} – Value per neuron (best)")
+                _overlay_maxgap(a_best, b_best, os.path.join(layer_dir, "overlay_maxgap_best.png"),
+                                title=f"{layer} – Gap from max (best)")
+
+                sA = _basic_stats(a_best, cv_mode=cv_mode)
+                sB = _basic_stats(b_best, cv_mode=cv_mode)
+                ks = _ks_distance(a_best, b_best)
+                w1 = _wasserstein_1d(a_best, b_best)
+                nmin = min(a_best.size, b_best.size)
+                rho = np.corrcoef(
+                    np.argsort(np.argsort(a_best[:nmin])),
+                    np.argsort(np.argsort(b_best[:nmin]))
+                )[0,1]
+                best_log.append(
+                    f"[{layer}] BEST  A@{best_epoch_A} vs B@{best_epoch_B}\n"
+                    f" Δmean={sA['mean']-sB['mean']:+.6f}  Δmedian={sA['median']-sB['median']:+.6f}  "
+                    f" Δvar={sA['variance']-sB['variance']:+.6f}  ΔIQR={sA['IQR']-sB['IQR']:+.6f}  "
+                    f" ΔCV={sA['CV']-sB['CV']:+.6f}  Δp95={sA['p95']-sB['p95']:+.6f}  "
+                    f" Δskew={sA['skewness']-sB['skewness']:+.6f}  Δgini={sA['gini']-sB['gini']:+.6f}\n"
+                    f" KS={ks:.4f}  W1={w1:.6f}  Spearman ρ_s≈{rho:.4f}\n"
+                )
+
+    # write comparison logs
+    with open(os.path.join(out_dir, "comparison_last_epochs.txt"), "w") as f:
+        f.write("=== BETWEEN-RUN COMPARISON @ LAST EPOCHS ===\n")
+        f.writelines(last_log)
+    if best_log:
+        with open(os.path.join(out_dir, "comparison_best_epochs.txt"), "w") as f:
+            f.write("=== BETWEEN-RUN COMPARISON @ BEST EPOCHS ===\n")
+            f.writelines(best_log)
+
+    # optional: aggregate across layers barplots of KS/W1 at last & best
+    def _aggregate_plot(entries: List[str], out_png: str, label: str):
+        # parse lines to get KS and W1
+        layers, kss, w1s = [], [], []
+        for line in entries:
+            if line.startswith("[") and "KS=" in line:
+                parts = line.split()
+                layer = line.split("]")[0][1:]
+                KS = float([p for p in parts if p.startswith("KS=")][0].split("=")[1])
+                W1 = float([p for p in parts if p.startswith("W1=")][0].split("=")[1])
+                layers.append(layer); kss.append(KS); w1s.append(W1)
+        if not layers: return
+        x = np.arange(len(layers))
+        plt.figure(figsize=(max(6, 0.4*len(layers)), 3))
+        plt.bar(x-0.18, kss, width=0.36, label="KS")
+        plt.bar(x+0.18, w1s, width=0.36, label="W1")
+        plt.xticks(x, layers, rotation=60, ha="right")
+        plt.ylabel(label); plt.title(f"{label} per layer")
+        plt.legend(); plt.tight_layout(); plt.savefig(out_png, dpi=160); plt.close()
+
+    _aggregate_plot(last_log, os.path.join(out_dir, "aggregate_last_KS_W1.png"),
+                    label="Distance (last epochs)")
+    if best_log:
+        _aggregate_plot(best_log, os.path.join(out_dir, "aggregate_best_KS_W1.png"),
+                        label="Distance (best epochs)")
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser("Compare two conductance runs")
+    p.add_argument("--runA", required=True, help="Path to RUN A stats dir (contains epoch_XXXX folders)")
+    p.add_argument("--runB", required=True, help="Path to RUN B stats dir (contains epoch_XXXX folders)")
+    p.add_argument("--out",  required=True, help="Output directory for comparison plots & logs")
+    p.add_argument("--bestA", type=int, default=None, help="Best epoch index for RUN A (optional)")
+    p.add_argument("--bestB", type=int, default=None, help="Best epoch index for RUN B (optional)")
+    p.add_argument("--metrics", nargs="+", default=None,
+                   help="Subset of metrics to plot over time. "
+                        "Choose from: mean median variance IQR CV p5 p95 skewness gini")
+    p.add_argument("--bins", type=int, default=200, help="Bins for hist overlays (default: 60)")
+    p.add_argument("--cv-mode", choices=["abs", "signed"], default="abs",
+                   help="CV definition: abs -> std(|x|)/mean(|x|), signed -> std/|mean|")
+    return p.parse_args()
+
+def _die(msg: str, code: int = 2):
+    print(f"[ERROR] {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def main():
+    args = parse_args()
+
+
+    # sanity checks
+    for label, path in [("RUN A", args.runA), ("RUN B", args.runB)]:
+        if not os.path.isdir(path):
+            _die(f"{label} path does not exist or is not a directory: {path}")
+        # quick check for epoch folders
+        has_epochs = any(d.startswith("epoch_") for d in os.listdir(path))
+        if not has_epochs:
+            print(f"[WARN] {label} has no epoch_* folders at: {path} — is this the correct stats dir?", file=sys.stderr)
+
+    os.makedirs(args.out, exist_ok=True)
+
+    # call the comparator
+    compare_runs(
+        runA_dir=args.runA,
+        runB_dir=args.runB,
+        best_epoch_A=args.bestA,
+        best_epoch_B=args.bestB,
+        out_dir=args.out,
+        metrics_to_plot=args.metrics,
+        bins=args.bins,
+        cv_mode=args.cv_mode,
+    )
+
+    print(f"[OK] comparison complete. outputs in: {args.out}")
+
+if __name__ == "__main__":
+    main()
