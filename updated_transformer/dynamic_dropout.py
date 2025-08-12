@@ -336,35 +336,11 @@ class MyDropout(nn.Module):
 
         with torch.no_grad():
             if self.previous.numel() > 1:
-                self.previous.copy_(self._switch_tensor(self.previous))
+                self.previous.copy_(_switch_tensor(self.previous))
             if self.scaling.numel() > 1:
-                self.scaling.copy_(self._switch_tensor(self.scaling))
+                self.scaling.copy_(_switch_tensor(self.scaling))
             
-    def _switch_tensor(t: torch.Tensor) -> torch.Tensor:
-        """
-        Return a tensor with values reverse-mapped by rank.
-        NaN/Inf entries are left in place and not involved in the switch.
-        """
-        flat = t.reshape(-1)
-        out = flat.clone()
-
-        # operate only on finite entries
-        finite_mask = torch.isfinite(flat)
-        if finite_mask.sum() <= 1:
-            return t  # nothing to reorder (0 or 1 finite values)
-
-        idx = torch.nonzero(finite_mask, as_tuple=False).squeeze(1)   # original indices of finite values
-        vals = flat[idx]
-
-        # argsort within the finite subset (ascending)
-        order = torch.argsort(vals, dim=0)                # positions in 'vals' from smallest -> largest
-        pos_asc = idx[order]                              # original indices of ascending ranks
-        vals_desc = vals[order.flip(0)]                   # values in descending order
-
-        # write back: smallest index gets largest value, etc.
-        out[pos_asc] = vals_desc
-
-        return out.view_as(t)   
+  
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -418,3 +394,28 @@ def to_2d(arr):
     else:
         # Flatten all dimensions except the last one.
         return arr.reshape(-1, arr.shape[-1])
+def _switch_tensor(t: torch.Tensor) -> torch.Tensor:
+    """
+    Return a tensor with values reverse-mapped by rank.
+    NaN/Inf entries are left in place and not involved in the switch.
+    """
+    flat = t.reshape(-1)
+    out = flat.clone()
+
+    # operate only on finite entries
+    finite_mask = torch.isfinite(flat)
+    if finite_mask.sum() <= 1:
+        return t  # nothing to reorder (0 or 1 finite values)
+
+    idx = torch.nonzero(finite_mask, as_tuple=False).squeeze(1)   # original indices of finite values
+    vals = flat[idx]
+
+    # argsort within the finite subset (ascending)
+    order = torch.argsort(vals, dim=0)                # positions in 'vals' from smallest -> largest
+    pos_asc = idx[order]                              # original indices of ascending ranks
+    vals_desc = vals[order.flip(0)]                   # values in descending order
+
+    # write back: smallest index gets largest value, etc.
+    out[pos_asc] = vals_desc
+
+    return out.view_as(t)   
