@@ -321,335 +321,50 @@ class MyDropout(nn.Module):
             #return mask * input / (self.base_keep)  # Avoid division by zero with a small epsilon
             return mask * input / (expanded_scaling + 1e-12)  # Avoid division by zero with a small epsilon
 
-    def update_aggregated_statistics(self, scoring, keep_prob):
+    def switch(self):
+        if self.mask_type == "softmax_inverse":
+            self.mask_type = "softmax"
+        elif self.mask_type == "softmax":
+                self.mask_type = "softmax_inverse"
+        elif self.mask_type == "sigmoid_inverse":
+            self.mask_type = "sigmoid"
+        elif self.mask_type == "sigmoid":
+            self.mask_type = "sigmoid_inverse"
+        if not self.initialized:
+        # nothing to do until buffers are created
+            return
+
+        with torch.no_grad():
+            if self.previous.numel() > 1:
+                self.previous.copy_(self._switch_tensor(self.previous))
+            if self.scaling.numel() > 1:
+                self.scaling.copy_(self._switch_tensor(self.scaling))
+            
+    def _switch_tensor(t: torch.Tensor) -> torch.Tensor:
         """
-        Update incremental (running) aggregated statistics with the new scoring and keep_prob values.
-        This replaces storing all raw histories.
-        It updates:
-          - running_scoring_mean (per neuron)
-          - running_dropout_mean (per neuron)
-          - cumulative histograms for scoring and dropout over fixed bins.
+        Return a tensor with values reverse-mapped by rank.
+        NaN/Inf entries are left in place and not involved in the switch.
         """
-        # a) Detach and convert to CPU numpy arrays.
+        flat = t.reshape(-1)
+        out = flat.clone()
 
-        scoring_det = scoring.detach().cpu().float()
-        keep_prob_det = 1-keep_prob.detach().cpu().float()
-        # print("Scoring shape: ",scoring_det.shape)
-        # print("Keep rate shape: ",keep_prob_det.shape)        
-        # b) Update running means per neuron.
-        if self.running_scoring_mean is None or self.running_dropout_mean is None:
-            self.running_scoring_mean = scoring_det.clone()
-            self.running_dropout_mean = keep_prob_det.clone()
-        else:
-            self.running_scoring_mean = (self.running_scoring_mean * self.n_updates + scoring_det) / (self.n_updates + 1)
-            self.running_dropout_mean = (self.running_dropout_mean * self.n_updates + keep_prob_det) / (self.n_updates + 1)
-        
-        current_sum_scoring = scoring_det.sum().item()
-        
-        # d) Update cumulative sums
-        if self.sum_scoring is None:
-            self.sum_scoring = current_sum_scoring
-        else:
-            self.sum_scoring += current_sum_scoring
+        # operate only on finite entries
+        finite_mask = torch.isfinite(flat)
+        if finite_mask.sum() <= 1:
+            return t  # nothing to reorder (0 or 1 finite values)
 
-        # Update histograms.
-        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
+        idx = torch.nonzero(finite_mask, as_tuple=False).squeeze(1)   # original indices of finite values
+        vals = flat[idx]
 
-        hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
-        self.scoring_hist += hist_scoring
-        for i, idx_tuple in enumerate(self.random_neurons):
-            # idx_tuple is e.g. (c,h,w) or (d,)
-            val = scoring_det[idx_tuple].item()
-            hist_scoring_neuron, _ = np.histogram([val], bins=bins_scoring)
-            self.random_neuron_hists_scoring[i] += hist_scoring_neuron
-        #print("Scoring hist focused before:",self.scoring_hist_focused)
+        # argsort within the finite subset (ascending)
+        order = torch.argsort(vals, dim=0)                # positions in 'vals' from smallest -> largest
+        pos_asc = idx[order]                              # original indices of ascending ranks
+        vals_desc = vals[order.flip(0)]                   # values in descending order
 
-        bins_scoring_focused = np.linspace(-0.05, 0.2, 301)  # Focused histogram for scoring.
-        hist_scoring_focused, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring_focused)
-        self.scoring_hist_focused += hist_scoring_focused
-        #print("Scoring hist focused after:",self.scoring_hist_focused)
-        
-        bins_keep = np.linspace(0.0, 0.8, 101)
+        # write back: smallest index gets largest value, etc.
+        out[pos_asc] = vals_desc
 
-        hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
-        for i, idx_tuple in enumerate(self.random_neurons):
-            val = keep_prob_det[idx_tuple].item()
-            hist_keep_neuron, _ = np.histogram([val], bins=bins_keep)
-            self.random_neuron_hists_keep[i] += hist_keep_neuron
-        self.keep_hist += hist_keep
-        
-        # Increment the update counter.
-        self.n_updates += 1
-        
-              
-    def update_progression(self,save_dir,label=''):
-        if self.sum_scoring is not None and self.running_dropout_mean is not None:
-            self.progression_keep.append(self.running_dropout_mean.mean().item())
-            self.progression_scoring.append(self.sum_scoring)
-            np.save(os.path.join(save_dir, f"{label}_progression_keep.npy"), self.progression_keep)
-            np.save(os.path.join(save_dir, f"{label}_progression_scoring.npy"), self.progression_scoring)
-
-    def clear_progression(self):
-        """Clear the progression statistics."""
-        self.n_updates = 0  # Number of updates processed.
-        self.running_scoring_mean = None  # Running (per-neuron) average of scoring.
-        self.running_dropout_mean = None  # Running (per-neuron) average of keep probability.
-        
-        # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
-        self.scoring_hist = np.zeros(100)  
-        self.scoring_hist_focused = np.zeros(300)  # Focused histogram for scoring.
-        self.keep_hist = np.zeros(100)
-        self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
-        self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
-        
-        # For progression statistics (one scalar per update).
-        self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
-        self.sum_keep = None 
-    def save_statistics(self, epoch_dir,layer_label =''):
-        """
-        Save all numerical statistics for a given epoch to disk in a subfolder.
-        Returns the path to the epoch folder.
-        """
-        # Create epoch-specific folder
-        # epoch_dir = os.path.join(base_dir, f"epoch_{epoch_label}")
-        # os.makedirs(epoch_dir, exist_ok=True)
-
-        # 1) Histograms
-        np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist.npy"), self.scoring_hist)
-        np.save(os.path.join(epoch_dir, f"{layer_label}_keep_hist.npy"), self.keep_hist)
-        np.save(os.path.join(epoch_dir, f"{layer_label}_scoring_hist_focused.npy"), self.scoring_hist_focused)
-
-        # 2) Running means (convert to numpy)
-        if self.running_scoring_mean is None:
-            np.save(
-                os.path.join(epoch_dir, f"{layer_label}_running_scoring_mean.npy"),
-                self.running_scoring_mean.cpu().numpy()
-            )
-        if self.running_dropout_mean is None:
-            np.save(
-                os.path.join(epoch_dir, f"{layer_label}_running_dropout_mean.npy"),
-                self.running_dropout_mean.cpu().numpy()
-            )
-        for i, neuron in enumerate(self.random_neurons):
-            neuron_str = "_".join(str(x) for x in neuron)
-
-            # Build the filenames
-            scoring_fname = f"{layer_label}_random_neuron_{neuron_str}_scoring_hist.npy"
-            keep_fname    = f"{layer_label}_random_neuron_{neuron_str}_keep_hist.npy"
-
-            # Save out the arrays
-            np.save(os.path.join(epoch_dir, scoring_fname),
-                    self.random_neuron_hists_scoring[i])
-            np.save(os.path.join(epoch_dir, keep_fname),
-                    self.random_neuron_hists_keep[i])
-    def plot_aggregated_statistics(self, epoch_label, save_dir=None):
-        """
-        Plot the aggregated statistics:
-         • Two histograms:
-              - Scoring histogram (50 bins, fixed range -5 to 5).
-              - Keep probability histogram (50 bins, fixed range 0 to 1).
-         • Two heatmaps:
-              - Running per-neuron average scoring.
-              - Running per-neuron average keep probability.
-        """
-        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-        
-        # Histogram for scoring.
-        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
-
-        bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
-        axs[0, 0].bar(bin_centers_scoring, self.scoring_hist, width=(bins_scoring[1]-bins_scoring[0]))
-        axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
-        axs[0, 0].set_xlabel("Scoring")
-        axs[0, 0].set_ylabel("Count")
-        
-        # Histogram for keep probability.
-        bins_keep = np.linspace(0.0, 0.8, 101)
-
-        bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
-        axs[0, 1].bar(bin_centers_keep, self.keep_hist, width=(bins_keep[1]-bins_keep[0]))
-        axs[0, 1].set_title(f"{epoch_label} - Dropout Rate Histogram")
-        axs[0, 1].set_xlabel("Dropout Rate")
-        axs[0, 1].set_ylabel("Count")
-        
-        # Heatmap for running scoring mean.
-        if self.running_scoring_mean is not None:
-            scoring_mean_np = self.running_scoring_mean.cpu().numpy()
-            scoring_mean_2d = to_2d(scoring_mean_np)
-            im0 = axs[1, 0].imshow(scoring_mean_2d, aspect='auto', cmap='viridis')
-            axs[1, 0].set_title(f"{epoch_label} - Mean Scoring per Neuron")
-            fig.colorbar(im0, ax=axs[1, 0])
-        else:
-            axs[1, 0].text(0.5, 0.5, "No Data", ha="center", va="center")
-        
-        # Heatmap for running keep probability mean.
-        if self.running_dropout_mean is not None:
-            dropout_mean_np = self.running_dropout_mean.cpu().numpy()
-            dropout_mean_2d = to_2d(dropout_mean_np)
-            im1 = axs[1, 1].imshow(dropout_mean_2d, aspect='auto', cmap='magma')
-            axs[1, 1].set_title(f"{epoch_label} - Mean Dropout Rate per Neuron")
-            fig.colorbar(im1, ax=axs[1, 1])
-        else:
-            axs[1, 1].text(0.5, 0.5, "No Data", ha="center", va="center")
-        
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"{epoch_label}_aggregated_stats.png"))
-        plt.close(fig)
-
-    def plot_current_stats(self, epoch,batch_idx, save_dir=None,layer_label= 0, block = False):
-        """
-        Plot the aggregated statistics:
-         • Two histograms:
-              - Scoring histogram (50 bins, fixed range -5 to 5).
-              - Keep probability histogram (50 bins, fixed range 0 to 1).
-         • Two heatmaps:
-              - Running per-neuron average scoring.
-              - Running per-neuron average keep probability.
-        """
-        if block:
-              block_num = layer_label//4
-              layer_num = layer_label%4
-              epoch_label =f'Epoch {epoch} block {block_num} layer {layer_num} sample { batch_idx//350}'
-              epoch_label2 =f'Epoch_{epoch}_block{block_num}_layer_{layer_num}_sample_{ batch_idx//350}'
-        else:
-            epoch_label =f'Epoch {epoch} layer {layer_label} sample { batch_idx//350}'
-            epoch_label2 =f'Epoch_{epoch}_layer_{layer_label}_sample_{ batch_idx//350}'
-
-        scoring_det = self.scoring.detach().cpu().float()
-        keep_prob_det = 1-self.previous.detach().cpu().float()
-        score_mean = scoring_det.mean().item()
-        score_std = scoring_det.std().item()
-        keep_mean = keep_prob_det.mean().item()
-        keep_std = keep_prob_det.std().item()
-        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
-        hist_scoring, _ = np.histogram(scoring_det.numpy().flatten(), bins=bins_scoring)
-        bins_keep = np.linspace(0.0, 0.8, 101)
-        hist_keep, _ = np.histogram(keep_prob_det.numpy().flatten(), bins=bins_keep)
-        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-        
-        # Histogram for scoring.
-        bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
-        axs[0, 0].bar(bin_centers_scoring, hist_scoring, width=(bins_scoring[1]-bins_scoring[0]))
-        axs[0, 0].set_title(f"{epoch_label} - Scoring Histogram")
-        axs[0, 0].set_xlabel("Scoring")
-        axs[0, 0].set_ylabel("Count")
-        axs[0, 0].text(
-            0.05, 0.95,
-            f"Mean: {score_mean:.3f}\nStd: {score_std:.3f}",
-            transform=axs[0, 0].transAxes,
-            va="top"
-        )
-        
-        # Histogram for keep probability.
-        bin_centers_keep = (bins_keep[:-1] + bins_keep[1:]) / 2
-        axs[0, 1].bar(bin_centers_keep, hist_keep, width=(bins_keep[1]-bins_keep[0]))
-        axs[0, 1].set_title(f"{epoch_label} - Dropout Histogram")
-        axs[0, 1].set_xlabel("Dropout Rate")
-        axs[0, 1].set_ylabel("Count")
-        axs[0, 1].text(
-            0.05, 0.95,
-            f"Mean: {keep_mean:.3f}\nStd: {keep_std:.3f}",
-            transform=axs[0, 1].transAxes,
-            va="top"
-        )
-        
-        # Heatmap for running scoring mean.
-        if self.scoring is not None:
-            scoring_mean_np = self.scoring.cpu().numpy()
-            scoring_mean_2d = to_2d(scoring_mean_np)
-            im0 = axs[1, 0].imshow(scoring_mean_2d, aspect='auto', cmap='viridis')
-            axs[1, 0].set_title(f"{epoch_label} - Scoring per Neuron")
-            fig.colorbar(im0, ax=axs[1, 0])
-        else:
-            axs[1, 0].text(0.5, 0.5, "No Data", ha="center", va="center")
-        
-        # Heatmap for running keep probability mean.
-        if self.previous is not None:
-            dropout_mean_np = 1-self.previous.cpu().numpy()
-            dropout_mean_2d = to_2d(dropout_mean_np)
-            im1 = axs[1, 1].imshow(dropout_mean_2d, aspect='auto', cmap='magma')
-            axs[1, 1].set_title(f"{epoch_label} - Dropout Rate per Neuron")
-            fig.colorbar(im1, ax=axs[1, 1])
-        else:
-            axs[1, 1].text(0.5, 0.5, "No Data", ha="center", va="center")
-        
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"{epoch_label2}_current_stats.png"))
-        plt.close(fig)
-
-    def plot_random_node_histograms_scoring(self, epoch_label, save_dir=None):
-        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-        bins_scoring = np.linspace(-0.7, 0.7, 101)  # 50 bins => 51 edges.
-        for i, neuron in enumerate(self.random_neurons):
-            hist_scoring = self.random_neuron_hists_scoring[i]
-            bin_centers_scoring = (bins_scoring[:-1] + bins_scoring[1:]) / 2
-            axs[i // 2, i % 2].bar(bin_centers_scoring, hist_scoring, width=(bins_scoring[1]-bins_scoring[0]))
-            axs[i // 2, i % 2].set_title(f"{epoch_label} Neuron {neuron} - Scoring Histogram")
-            axs[i // 2, i % 2].set_xlabel("Scoring")
-            axs[i // 2, i % 2].set_ylabel("Count")
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_scoring_histograms.png"))
-        plt.close(fig)
-    def plot_random_node_histograms_keep(self, epoch_label, save_dir=None):
-        fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-        bins_keep = np.linspace(0.0, 0.8, 101)
-        for i, neuron in enumerate(self.random_neurons):
-            hist_scoring = self.random_neuron_hists_keep[i]
-            bin_centers_scoring = (bins_keep[:-1] + bins_keep[1:]) / 2
-            axs[i // 2, i % 2].bar(bin_centers_scoring, hist_scoring, width=(bins_keep[1]-bins_keep[0]))
-            axs[i // 2, i % 2].set_title(f"{epoch_label} Neuron {neuron} - Dropout Rate Histogram")
-            axs[i // 2, i % 2].set_xlabel("Dropout Rate")
-            axs[i // 2, i % 2].set_ylabel("Count")
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-
-            fig.savefig(os.path.join(save_dir, f"{epoch_label}_random_node_dropout_histograms.png"))
-        plt.close(fig)
-
-
-
-    
-
-    def plot_progression_statistics(self, save_dir=None, label="progression"):
-        """
-        Plot the progression of overall averages over updates.
-        This function creates a 2×1 plot:
-         • Top subplot: progression of overall average scoring.
-         • Bottom subplot: progression of overall average keep probability.
-         
-        The x-axis shows the update number, and the y-axis shows the corresponding progression value.
-        """
-        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
-        updates = np.arange(1, len(self.progression_scoring) + 1)
-        
-        # Plot progression for scoring.
-        axs[0].plot(updates, self.progression_scoring, marker='o', linestyle='-')
-        axs[0].set_title("Overall Scoring Sum over an Epoch Progression")
-        axs[0].set_xlabel("Update Number")
-        axs[0].set_ylabel("Scoring Sum")
-        axs[0].grid(True)
-        
-        # Plot progression for keep probability.
-        axs[1].plot(updates, self.progression_keep, marker='o', linestyle='-')
-        axs[1].set_title("Overall Average Dropout Rate over an Epoch Progression")
-        axs[1].set_xlabel("Update Number")
-        axs[1].set_ylabel("Average Dropout Rate")
-        axs[1].grid(True)
-        
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"{label}_progression.png"))
-            print(f"Progression plot saved to {os.path.join(save_dir, f'{label}_progression.png')}")
-        plt.close(fig)
-
+        return out.view_as(t)   
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):

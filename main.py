@@ -258,6 +258,8 @@ def get_args_parser():
                         help='Enable statistics logging')
     parser.add_argument('--conductance_batch_size', type=int, default=32,
                         help='Batch size for conductance calculation')
+    parser.add_argument('--switch_epochs', type=int, default=None,
+                        help='Number of steps to accumulate gradients for conductance')
     return parser
 
 
@@ -845,6 +847,9 @@ def main(args):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+        if args.switch_epochs is not None and patience_counter > 0 and patience_counter% args.switch_epochs == 0:
+            for _, drop in enumerate(model.module.drop_list if hasattr(model, 'module') else model.drop_list):
+                drop.switch()
         if patience_counter >= args.early_stopping_patience:
             print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
             break
