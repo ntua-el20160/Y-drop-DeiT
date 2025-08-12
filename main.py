@@ -858,6 +858,7 @@ def main(args):
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
     if args.stats:
+        print('Building stats reports')
         build_reports(
             output_dir=stats_dir,
             transformer=True,   # must match how you named the layers
@@ -865,6 +866,7 @@ def main(args):
             cv_mode="signed",
             bins=200
         )
+        print('Building minmax stats reports')
         build_reports(
             output_dir=stats_dir2,
             transformer=True,   # must match how you named the layers
