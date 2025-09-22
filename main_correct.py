@@ -13,7 +13,17 @@ import torch.backends.cudnn as cudnn
 import json
 import random
 from pathlib import Path
-from updated_transformer.plots import plot_epoch_statistics
+from updated_transformer.dynamic_dropath import  DropPath
+import copy as _copy
+import os
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+from timm.data import create_transform
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+#from augment import new_data_aug_generator
+import torch.nn as nn
+import torch.nn.functional as F
+from updated_transformer.dynamic_dropout import MyDropout
 
 from timm.data import Mixup
 from timm.models import create_model
@@ -22,16 +32,46 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
-from datasets import build_dataset, create_subdataset
+from datasets2 import build_dataset, create_subdataset
 from engine import train_one_epoch, evaluate
-#from losses import DistillationLosss
+from losses import DistillationLoss
 from samplers import RASampler
 #from augment import new_data_aug_generator
 import models
 import utils
 #import models_v2
+from stats_logging import StreamingConductanceEpochTracker,build_reports
+class PerSampleSoftTargetCE(nn.Module):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # targets: [B] (long) or [B, C] (float)
+        if targets.ndim == 1 or targets.dtype == torch.long:
+            targets = F.one_hot(targets, num_classes=logits.size(-1)).to(logits.dtype)
+        else:
+            if targets.size(-1) != logits.size(-1):
+                raise RuntimeError(
+                    f"targets.size(-1) = {targets.size(-1)} "
+                    f"!= logits.size(-1) = {logits.size(-1)}"
+                )
+            targets = targets.to(logits.dtype)
+        return (-targets * F.log_softmax(logits, dim=-1)).sum(dim=-1)  # [B]
+class LabelSmoothingCrossEntropyNoRed(nn.Module):
+    """Per-sample label-smoothed cross-entropy (no reduction)."""
+    def __init__(self, smoothing: float = 0.1):
+        super().__init__()
+        assert 0.0 <= smoothing < 1.0
+        self.smoothing = float(smoothing)
+        self.confidence = 1.0 - self.smoothing
 
-
+    def forward(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        x:      [B, C] logits
+        target: [B]    class indices (LongTensor)
+        returns: [B]   per-sample losses
+        """
+        logprobs = F.log_softmax(x, dim=-1)                  # [B, C]
+        nll_loss = -logprobs.gather(1, target.unsqueeze(1)).squeeze(1)  # [B]
+        smooth_loss = -logprobs.mean(dim=-1)                 # [B]
+        return self.confidence * nll_loss + self.smoothing * smooth_loss
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
@@ -40,14 +80,14 @@ def get_args_parser():
     parser.add_argument('--unscale-lr', action='store_true')
 
     # Model parameters
-    parser.add_argument('--model', default='deit_base_patch16_224', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='deit_tiny_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--input-size', default=224, type=int, help='images input size')
 
     parser.add_argument('--drop_rate', type=float, default=0.0, metavar='PCT',
                     help='Dropout rate (default: 0.)')
 
-    parser.add_argument('--drop-path', type=float, default=0.1, metavar='PCT',
+    parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
     parser.add_argument('--drop-block', type=float, default=None, metavar='PCT',
                         help='Drop block rate (default: None)')
@@ -102,8 +142,8 @@ def get_args_parser():
                         help='LR decay rate (default: 0.1)')
 
     # Augmentation parameters
-    parser.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
-                        help='Color jitter factor (default: 0.4)')
+    parser.add_argument('--color-jitter', type=float, default=0.3, metavar='PCT',
+                        help='Color jitter factor (default: 0.3)')
     parser.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME',
                         help='Use AutoAugment policy. "v0" or "original". " + \
                              "(default: rand-m9-mstd0.5-inc1)'),
@@ -149,19 +189,19 @@ def get_args_parser():
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
 # # Distillation parameters
-#     parser.add_argument('--teacher-model', default='regnety_160', type=str, metavar='MODEL',
-#                         help='Name of teacher model to train (default: "regnety_160"')
-#     parser.add_argument('--teacher-path', type=str, default='')
-#     parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
-#     parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
-#     parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
+    # parser.add_argument('--teacher-model', default='regnety_160', type=str, metavar='MODEL',
+    #                     help='Name of teacher model to train (default: "regnety_160"')
+    # parser.add_argument('--teacher-path', type=str, default='')
+    # parser.add_argument('--distillation-type', default='none', choices=['none', 'soft', 'hard'], type=str, help="")
+    # parser.add_argument('--distillation-alpha', default=0.5, type=float, help="")
+    # parser.add_argument('--distillation-tau', default=1.0, type=float, help="")
     
-#     # * Cosub params
-#     parser.add_argument('--cosub', action='store_true') 
+    # * Cosub params
+    parser.add_argument('--cosub', action='store_true') 
     
-#     # * Finetuning params
-#     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
-#     parser.add_argument('--attn-only', action='store_true') 
+    # * Finetuning params
+    parser.add_argument('--finetune', default='', help='finetune from checkpoint')
+    parser.add_argument('--attn-only', action='store_true') 
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01_101/imagenet_full_size/061417/', type=str,
                         help='dataset path')
@@ -204,6 +244,10 @@ def get_args_parser():
                     help='Enable Y-Drop (MyDropout) by default')
     parser.add_argument('--no-ydrop', dest='ydrop', action='store_false',
                     help='Disable Y-Drop (MyDropout)')
+    #added
+    parser.add_argument('--ypath', action='store_true', default=False,
+                    help='Enable Y-Path (MyPath)')
+    #added
 
     parser.add_argument('--elasticity', type=float, default=0.01,
                         help='Elasticity factor for custom dropout')
@@ -227,11 +271,11 @@ def get_args_parser():
     parser.add_argument('--update_scaling',choices=['no','increasing', 'decreasing'], default='no', type =str,
                         help='Scale update frequency  for custom dropout')
     parser.add_argument('--update_scaling_steps', default=5, type=int, help='Amount of frequency updates')
-    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity','Conductance_alt'], default='Conductance',
+    parser.add_argument('--scoring-type', choices=['Conductance', 'Sensitivity',"Conductance_alt"], default='Conductance',
                         type=str, help='Scoring type for custom dropout')
     parser.add_argument('--same_batch', action='store_true', default=False,
                         help='Enable smooth scoring for custom dropout')
-    parser.add_argument('--transformer_mean', action='store_true', default=False,
+    parser.add_argument('--mode',type=str, default=None,choices=['cls', 'mean',"sum","topk"],
                         help='Enable smooth scoring for custom dropout')
     parser.add_argument('--noisy_score', action='store_true', default=False,
                         help='Noise addition to score')
@@ -244,29 +288,36 @@ def get_args_parser():
     
     parser.add_argument('--alt_attention_cond', action='store_true', default=False,
                 help='Calculate conductance after normalization')
-    parser.add_argument('--rescaling_type',choices=['linear','piecewise', 'power_law'], default=None, type =str,
+    parser.add_argument('--rescaling_type',choices=['linear','projection', 'power_law'], default=None, type =str,
                     help='Method to rescale the the limits of the dropout masks')
-    
+    parser.add_argument('--stats', action='store_true', default=False,
+                        help='Enable statistics logging')
+    parser.add_argument('--no_attn', action='store_true', default=True,
+                        help='Disable attention mechanism')
+    parser.add_argument('--conductance_batch_size', type=int, default=32,
+                        help='Batch size for conductance calculation')
+    parser.add_argument('--switch_epochs', type=int, default=None,
+                        help='Number of steps to accumulate gradients for conductance')
+    parser.add_argument('--epoch-gap', type=int, default=1,
+                        help='Save tracker stats/logs every N epochs (also used by build_reports)')
+    parser.add_argument('--use-wds', action='store_true', default=False,
+                    help='Use WebDataset shards for ImageNet-1k (timm/imagenet-1k-wds)')
+    parser.add_argument('--wds-train', type=str,
+                        default='/leonardo_work/EUHPC_A04_051/tdir/imagenet_data/train_wds/imagenet1k-train-*.tar',
+                        help='Glob for train shards (WebDataset)')
+    parser.add_argument('--wds-val', type=str,
+                        default='/leonardo_work/EUHPC_A04_051/tdir/imagenet_data/val_wds/imagenet1k-validation-*.tar',
+                        help='Glob for val shards (WebDataset)')
+    parser.add_argument('--scaled_dropout', action='store_true', default=False,
+                        help='Enable scaled dropout')
     return parser
 
 
 def main(args):
     utils.init_distributed_mode(args)
 
-    # print(args)
-    
-    # if args.distillation_type != 'none' and args.finetune and not args.eval:
-    #     raise NotImplementedError("Finetuning with distillation not yet supported")
-    # device = torch.device(args.device)
+    seed = args.seed + utils.get_rank()
 
-    # # fix the seed for reproducibility
-    # seed = args.seed + utils.get_rank()
-    # torch.manual_seed(seed)
-    # np.random.seed(seed)
-    # # random.seed(seed)
-
-    # cudnn.benchmark = True
-    seed = args.seed
 
     # 1. Python built-in RNG
     random.seed(seed)
@@ -282,15 +333,16 @@ def main(args):
     # 5. Enforce deterministic behavior in cuDNN
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-    # random.seed(seed)
-
-    #cudnn.benchmark = True
+    # torch.backends.cuda.matmul.allow_tf32 = True
+    # torch.backends.cudnn.allow_tf32 = True
     device = torch.device(args.device)
+
+
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
     dataset_val, _ = build_dataset(is_train=False, args=args)
 
+    
     def preload_subdataset(subdataset):
         """
         Given a small subdataset (a torch.utils.data.Subset),
@@ -307,14 +359,14 @@ def main(args):
         cached_subdataset = preload_subdataset(sub_dataset)
     else:
         cached_subdataset = None
-    
-    effective_epochs = args.epochs - args.annealing_factor
-    step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1) 
+
+
+
 
     if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
+
         if args.repeated_aug:
             sampler_train = RASampler(
                 dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
@@ -336,6 +388,7 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
+
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
@@ -343,6 +396,7 @@ def main(args):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
+
     # if args.ThreeAugment:
     #     data_loader_train.dataset.transform = new_data_aug_generator(args)
 
@@ -362,14 +416,7 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
-#     model = create_model(
-#     args.model,
-#     pretrained=False,
-#     num_classes=args.nb_classes,
-#     drop=args.drop,
-#     drop_path_rate=args.drop_path,
-#     drop_block_rate=args.drop_block,
-# )
+
     print(f"Creating model: {args.model}")
 
     model = create_model(
@@ -385,48 +432,11 @@ def main(args):
     elasticity=args.elasticity,
     scaler=args.scaler,
     n_steps=args.n_steps,
-    transformer_mean=args.transformer_mean,
+    transformer_mean=True,
     rescaling_type=args.rescaling_type,
 )
                     
-    # if args.finetune:
-    #     if args.finetune.startswith('https'):
-    #         checkpoint = torch.hub.load_state_dict_from_url(
-    #             args.finetune, map_location='cpu', check_hash=True)
-    #     else:
-    #         checkpoint = torch.load(args.finetune, map_location='cpu')
-
-    #     checkpoint_model = checkpoint['model']
-    #     state_dict = model.state_dict()
-    #     for k in ['head.weight', 'head.bias', 'head_dist.weight', 'head_dist.bias']:
-    #         if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-    #             print(f"Removing key {k} from pretrained checkpoint")
-    #             del checkpoint_model[k]
-
-    #     # interpolate position embedding
-    #     pos_embed_checkpoint = checkpoint_model['pos_embed']
-    #     embedding_size = pos_embed_checkpoint.shape[-1]
-    #     num_patches = model.patch_embed.num_patches
-    #     num_extra_tokens = model.pos_embed.shape[-2] - num_patches
-    #     # height (== width) for the checkpoint position embedding
-    #     orig_size = int((pos_embed_checkpoint.shape[-2] - num_extra_tokens) ** 0.5)
-    #     # height (== width) for the new position embedding
-    #     new_size = int(num_patches ** 0.5)
-    #     # class_token and dist_token are kept unchanged
-    #     extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-    #     # only the position tokens are interpolated
-    #     pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-    #     pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
-    #     pos_tokens = torch.nn.functional.interpolate(
-    #         pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
-    #     pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
-    #     new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-    #     checkpoint_model['pos_embed'] = new_pos_embed
-
-    #     model.load_state_dict(checkpoint_model, strict=False)
-        
-
-
+   
     ### TO CHECK: AFTER NORM
     if args.after_norm:
         for i,block in enumerate(model.blocks):
@@ -438,10 +448,89 @@ def main(args):
         for i, block in enumerate(model.blocks):
             model.selected_layers[i*4] = block.attn.qkv
 
+    if args.ydrop:
+        model.selected_layers = []
+        model.drop_list = []
+        for i, block in enumerate(model.blocks):
+            block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+            #block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
+            # model.selected_layers.append(block.attn.attention_identity_layer)
+            if args.after_norm:
+                model.selected_layers.append(block.norm2)
+            else:
+                model.selected_layers.append(block.attn.proj)
+            model.selected_layers.append(block.mlp.fc1)
+
+            if i < len(model.blocks) - 1 and args.after_norm:
+                model.selected_layers.append(model.blocks[i+1].norm1)
+            else:
+                model.selected_layers.append(block.mlp.fc2)
+            # model.drop_list.append(block.attn.attn_drop)
+            model.drop_list.append(block.attn.proj_drop)
+            model.drop_list.append(block.mlp.drop1)
+            model.drop_list.append(block.mlp.drop2)
+
+
+    if args.scaled_dropout and args.ydrop:
+        rates = np.linspace(0, args.drop_rate, len(model.blocks))
+        model.drop_list = []
+        model.selected_layers = []
+        for i,block in enumerate(model.blocks):
+            if i == 0:
+                block.attn.attn_drop = torch.nn.Identity() # Disable attention dropout
+                block.attn.proj_drop = torch.nn.Identity()  # Disable projection dropout
+                block.mlp.drop1 = torch.nn.Identity()  # Disable attention dropout
+                block.mlp.drop2 = torch.nn.Identity()  # Disable projection dropout
+            else:
+                block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
+                block.attn.proj_drop = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.attn.proj, mask_type=args.mask_type, scaler=args.scaler,
+                                    transformer_mean=True,rescaling_type=args.rescaling_type)
+                block.mlp.drop1 = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.mlp.fc1, mask_type=args.mask_type, scaler=args.scaler,
+                                    transformer_mean=True,rescaling_type=args.rescaling_type)  # Disable attention dropout
+                block.mlp.drop2 = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.mlp.fc2, mask_type=args.mask_type, scaler=args.scaler,
+                                    transformer_mean=True,rescaling_type=args.rescaling_type)
+                                    
+                model.drop_list.append(block.attn.proj_drop)
+                model.drop_list.append(block.mlp.drop1)
+                model.drop_list.append(block.mlp.drop2) 
+                if args.after_norm:
+                    model.selected_layers.append(block.norm2)
+                else:
+                    model.selected_layers.append(block.attn.proj)
+                model.selected_layers.append(block.mlp.fc1)
+                if i < len(model.blocks) - 1 and args.after_norm:
+                    model.selected_layers.append(model.blocks[i+1].norm1)
+                else:
+                    model.selected_layers.append(block.mlp.fc2)
+    elif args.scaled_dropout:
+        rates = np.linspace(0, args.drop_rate, len(model.blocks))
+        for i,block in enumerate(model.blocks):
+            if i == 0:
+                block.attn.attn_drop = torch.nn.Identity() # Disable attention dropout
+                block.attn.proj_drop = torch.nn.Identity()  # Disable projection dropout
+                block.mlp.drop1 = torch.nn.Identity()  # Disable attention dropout
+                block.mlp.drop2 = torch.nn.Identity()  # Disable projection dropout
+            else:
+                block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
+                block.attn.proj_drop =  torch.nn.Dropout(rates[i])
+                block.mlp.drop1 = torch.nn.Dropout(rates[i])
+                block.mlp.drop2 = torch.nn.Dropout(rates[i])
+
+
+
 
     
+    # for i, block in enumerate(model.blocks):
+        
+    #     block.mlp.drop1 = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+    #     block.mlp.drop2 = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout   
+    #     model.selected_layers.append(block.attn.attention_identity_layer)
+    #     model.selected_layers.append(block.norm2)
+    #     model.drop_list.append(block.attn.attn_drop)
+    #     model.drop_list.append(block.attn.proj_drop)
 
 
+    #added
 
 
     # TODO: finetuning
@@ -460,26 +549,24 @@ def main(args):
             decay=args.model_ema_decay,
             device=ema_device,
             resume='')
-    # if args.model_ema:
-    # # If force_cpu is True, keep EMA on CPU; otherwise move the EMA copy onto the same device as `model`.
-    #    ema_device = 'cpu' if args.model_ema_force_cpu else device
-    #    model_ema = ModelEma(
-    #        model,
-    #        decay=args.model_ema_decay,
-    #        device=ema_device,
-    #        resume=''
-    #  )
 
 
+    # model_without_ddp = model
+    # if args.distributed:
+    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+    #     model_without_ddp = model.module
+    ##GPT CHANGES###
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-        model_without_ddp = model.module
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model_without_ddp = model.module
+    ###############    
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
+    print("base lr: %.2e" % (args.lr))
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
 
@@ -490,34 +577,17 @@ def main(args):
     if args.mixup > 0.:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
+
+
+        # model_without_ddp.criter = PerSampleSoftTargetCE()
+        #model_without_ddp.criter = LabelSmoothingCrossEntropyNoRed(smoothing=args.smoothing)
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+        model_without_ddp.criter = LabelSmoothingCrossEntropyNoRed(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()
-    model_without_ddp.criterion = criterion
-    # teacher_model = None
-    # if args.distillation_type != 'none':
-    #     assert args.teacher_path, 'need to specify teacher-path when using distillation'
-    #     print(f"Creating teacher model: {args.teacher_model}")
-    #     teacher_model = create_model(
-    #         args.teacher_model,
-    #         pretrained=False,
-    #         num_classes=args.nb_classes,
-    #         global_pool='avg',
-    #     )
-    #     if args.teacher_path.startswith('https'):
-    #         checkpoint = torch.hub.load_state_dict_from_url(
-    #             args.teacher_path, map_location='cpu', check_hash=True)
-    #     else:
-    #         checkpoint = torch.load(args.teacher_path, map_location='cpu')
-    #     teacher_model.load_state_dict(checkpoint['model'])
-    #     teacher_model.to(device)
-    #     teacher_model.eval()
-    # wrap the criterion in our custom DistillationLoss, which
-    # just dispatches to the original criterion if args.distillation_type is 'none'
-    # criterion = DistillationLoss(
-    #     criterion, teacher_model, args.distillation_type, args.distillation_alpha, args.distillation_tau
-    # )
+        model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
+
     args.experiment_name = f"{args.experiment_name}_seed{args.seed}"
 
 
@@ -550,12 +620,7 @@ def main(args):
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
                 
-                history = checkpoint.get('history', {})
-                if history:
-                    for i, drop in enumerate(model_without_ddp.drop_list):
-                        drop_history = history.get(f'drop{i}', {})
-                        drop.progression_keep = drop_history.get('progression_keep', [])
-                        drop.progression_scoring = drop_history.get('progression_scoring', [])
+              
                 if args.model_ema:
                     utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
                 if 'loss_scaler' in checkpoint:
@@ -591,14 +656,7 @@ def main(args):
 
     
 
-    if args.update_scaling == 'increasing':
-        update_freq = 1
-    else:
-        update_freq = args.update_freq
-    
-    effective_epochs = args.epochs - args.annealing_factor
-    step_size = round(effective_epochs / args.update_scaling_steps)
-    denom = max(1, args.update_scaling_steps - 1) 
+
 
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
@@ -614,37 +672,65 @@ def main(args):
             model.use_normal_dropout() 
 
     check = False
-    import os
+    if args.stats:
+        stats_dir = os.path.join(output_dir, "stats")
+        stats_dir2 = os.path.join(output_dir, "stats_minmax")
+
+        tracker = StreamingConductanceEpochTracker(
+            output_dir=stats_dir,
+            transformer=True,   # or False
+            block_mod=3,        # your 4-layers-per-block rule
+            cv_mode="signed",
+            sign_eps=0.0
+        )
+        tracker_post_minmax = StreamingConductanceEpochTracker(
+            output_dir=stats_dir2,
+            transformer=True,   # or False
+            block_mod=3,        # your 4-layers-per-block rule
+            cv_mode="signed",
+            sign_eps=0.0
+        )
+    else:
+        tracker = None
+        tracker_post_minmax = None
+
+
+    delta  = 0.1   # required improvement (use 10.0 if acc is in [0,100])
+    alive = True            # your boolean that flips
+    anchor_best = None      # best accuracy at the start of the current window
+    anchor_epoch = None 
+
     for epoch in range(saved_epoch, args.epochs):
+        save_this_epoch = args.stats and ((epoch % args.epoch_gap) == 0 or epoch == args.epochs - 1)
 
+        if save_this_epoch:
+            tracker.begin_epoch(epoch)
+            tracker_post_minmax.begin_epoch(epoch)
         epoch_start_time = time.time()
-        stats = False
 
-        
-        if args.ydrop and epoch >= args.annealing_factor:
-            if hasattr(model, 'module'):
-                model.module.use_ydrop()
-            else:
-                model.use_ydrop() 
-            check = True
-            if (epoch+1)%args.plot_freq == 0:
-                stats = True
-                epoch_dir = os.path.join(output_dir, "plots", f"epoch_{epoch+1}_data")
-                os.makedirs(epoch_dir, exist_ok=True)
-
-            if args.update_scaling!='no':
-                i = (epoch - args.annealing_factor) // step_size
-                i = min(i, args.update_scaling_steps - 1)
-
-                if args.update_scaling == 'increasing':
-                    step_index = i
+        if not alive:
+            check = False
+            if args.ydrop:
+                if hasattr(model, 'module'):
+                    model.module.use_normal_dropout()
                 else:
-                    step_index = args.update_scaling_steps - 1 - i
-                update_freq = round(1 + (args.update_freq - 1) * step_index / denom)
-                print(f"[Epoch {epoch}] Update frequency set to {update_freq}")
+                    model.use_normal_dropout()
+        elif (args.ydrop or args.ypath) and epoch >= args.annealing_factor:
+
+            if args.ydrop:
+                if hasattr(model, 'module'):
+                    model.module.use_ydrop()
+                else:
+                    model.use_ydrop() 
+            check = True
+
+
         
-        if args.distributed:
+        if args.distributed:# and not using_wds:
             data_loader_train.sampler.set_epoch(epoch)
+            #data_loader_train_clean.sampler.set_epoch(epoch)
+
+        max_norm = None if (args.clip_grad is None or args.clip_grad <= 0) else float(args.clip_grad)
 
         train_stats = train_one_epoch(
             model=model,
@@ -654,23 +740,26 @@ def main(args):
             device=device,
             epoch=epoch,
             loss_scaler=loss_scaler,
-            max_norm=args.clip_grad,
+            max_norm=max_norm,
             model_ema=model_ema,
             mixup_fn=mixup_fn,
             check=check,
-            update_freq=update_freq,
+            update_freq=args.update_freq,
             update_batches=args.update_batches,
-            stats = stats,
+            tracker=[tracker, tracker_post_minmax] if save_this_epoch else None,   # NEW
             scoring_type = args.scoring_type,
             same_batch = args.same_batch,
             help_par = 1,
-            noisy_score = args.noisy_score,
             noisy_dropout = args.noisy_dropout,
             update_data_loader = cached_subdataset,
-            output_dir=output_dir,
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
             mask_type=args.mask_type,
+            ypath= args.ypath,
+            support_loader=None,
+            conductance_batch_size =args.conductance_batch_size,
+            mode = args.mode,
+            no_attn = args.no_attn
         )
 
         
@@ -681,33 +770,23 @@ def main(args):
 
 
         test_stats = evaluate(data_loader_val, model, device)
-        print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        #val_count = IMAGENET_VAL_COUNT if using_wds else len(dataset_val)
+        #print(f"Accuracy of the network on the {val_count} test images: {test_stats['acc1']:.1f}%")
         test_acc = test_stats.get('acc1', 0.0)
         test_loss = test_stats.get('loss', 0.0)
         
-        if check and stats:
-            if hasattr(model, 'module'):
-                model.module.update_progression(output_dir / 'plots')
-                model.module.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.module.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.module.clear_progression()
-            else:
-                model.update_progression(output_dir / 'plots')
-                model.plot_progression_statistics(output_dir / 'plots',label = "")
-                model.save_statistics(epoch_dir)
-                plot_epoch_statistics(output_dir, epoch+1, epoch_dir,True)
-                model.clear_progression()
 
+        if save_this_epoch:
+            tracker.end_epoch()
+            tracker_post_minmax.end_epoch()
 
-        
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
             best_epoch = epoch + 1
-        
-        # print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-        #       f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s")
-        
+
+        # if args.switch_epochs is not None and args.ydrop and epoch >= args.switch_epochs:
+        #     alive = False
+            
         checkpoint ={
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -724,21 +803,14 @@ def main(args):
                 'patience_counter': patience_counter,
                 'best_epoch': best_epoch
                 }
-        if args.ydrop:
-            checkpoint['history'] = {}
-            for i, drop in enumerate(model.module.drop_list if hasattr(model, 'module') else model.drop_list):
-                checkpoint['history'][f'drop{i}'] = {
-                    'progression_keep': drop.progression_keep,
-                    'progression_scoring': drop.progression_scoring,
-                }   
+
         if test_loss < best_loss:
             best_loss = test_loss
             checkpoint['lowest_loss'] = best_loss
             patience_counter = 0  # reset early stopping counter
             checkpoint['patience_counter'] = patience_counter
 
-            # if args.output_dir:  
-            #     utils.save_on_master(checkpoint, output_dir / 'best.pth')
+
         else:
             patience_counter += 1
             checkpoint['patience_counter'] = patience_counter
@@ -765,6 +837,7 @@ def main(args):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
         if patience_counter >= args.early_stopping_patience:
             print(f"Early stopping triggered. No improvement in eval loss for {args.early_stopping_patience} epochs.")
             break
@@ -772,7 +845,25 @@ def main(args):
 
     total_time_str = str(datetime.timedelta(seconds=int(cumulative_train_time)))
     print(f"Training complete. Best Test Accuracy: {best_acc:.2f}% at epoch {best_epoch}. Total training time: {total_time_str}")
-        
+    if args.stats:
+        print('Building stats reports')
+        build_reports(
+            output_dir=stats_dir,
+            transformer=True,
+            block_mod=4,
+            cv_mode="signed",
+            bins=200,
+            epoch_gap=args.epoch_gap,   # NEW
+        )
+        print('Building minmax stats reports')
+        build_reports(
+            output_dir=stats_dir2,
+            transformer=True,
+            block_mod=4,
+            cv_mode="signed",
+            bins=200,
+            epoch_gap=args.epoch_gap,   # NEW
+        )
 
 
 if __name__ == '__main__':

@@ -21,10 +21,10 @@ from torchvision.transforms import InterpolationMode
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 #from augment import new_data_aug_generator
-import torch.nn as nn
-import torch.nn.functional as F
-from updated_transformer.dynamic_dropout import MyDropout
-from types import MethodType
+try:
+    import torch.distributed as dist
+except Exception:
+    dist = None
 
 from timm.data import Mixup
 from timm.models import create_model
@@ -34,53 +34,17 @@ from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
 from datasets2 import build_dataset, create_subdataset
-from engine import train_one_epoch, evaluate
+from engine_distributed import train_one_epoch, evaluate
 from losses import DistillationLoss
 from samplers import RASampler
 #from augment import new_data_aug_generator
-# import models
+import models
 import utils
+import torch.nn as nn
+import torch.nn.functional as F
+
 #import models_v2
 from stats_logging import StreamingConductanceEpochTracker,build_reports
-def crit_for(self, x, y_true):
-    """
-    Per-sample loss. Keeps gradients (no detach), returns [B].
-    """
-    logits = self(x)  # calls forward
-
-    # Make sure the criterion is the per-sample variant and on the right device.
-    loss_fn = self.criter
-    if isinstance(loss_fn, torch.nn.Module):
-        # move once at setup ideally; this is just a guard
-        try:
-            if next(loss_fn.parameters(), None) is not None:
-                loss_fn.to(logits.device)
-        except StopIteration:
-            pass
-
-    # Support hard labels [B] or soft labels [B, C]
-    if y_true.ndim == 1 and y_true.dtype != torch.long and logits.size(-1) > 1:
-        y_true = y_true.long()
-    elif y_true.ndim == 2:
-        y_true = y_true.to(logits.dtype)
-
-    loss = loss_fn(logits, y_true)   # must be reduction='none' to get [B] or [B, ...]
-    if loss.ndim > 1:
-        loss = loss.mean(dim=tuple(range(1, loss.ndim)))  # -> [B]
-    return loss
-class PerSampleSoftTargetCE(nn.Module):
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # targets: [B] (long) or [B, C] (float)
-        if targets.ndim == 1 or targets.dtype == torch.long:
-            targets = F.one_hot(targets, num_classes=logits.size(-1)).to(logits.dtype)
-        else:
-            if targets.size(-1) != logits.size(-1):
-                raise RuntimeError(
-                    f"targets.size(-1) = {targets.size(-1)} "
-                    f"!= logits.size(-1) = {logits.size(-1)}"
-                )
-            targets = targets.to(logits.dtype)
-        return (-targets * F.log_softmax(logits, dim=-1)).sum(dim=-1)  # [B]
 class LabelSmoothingCrossEntropyNoRed(nn.Module):
     """Per-sample label-smoothed cross-entropy (no reduction)."""
     def __init__(self, smoothing: float = 0.1):
@@ -335,106 +299,177 @@ def get_args_parser():
     parser.add_argument('--wds-val', type=str,
                         default='/leonardo_work/EUHPC_A04_051/tdir/imagenet_data/val_wds/imagenet1k-validation-*.tar',
                         help='Glob for val shards (WebDataset)')
-    parser.add_argument('--scaled_dropout', action='store_true', default=False,
-                        help='Enable scaled dropout')
     return parser
 
 
 def main(args):
     utils.init_distributed_mode(args)
+    if args.distributed:
+        if not hasattr(args, "gpu") or args.gpu is None:
+            args.gpu = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
+        torch.cuda.set_device(args.gpu)
+        args.device = f"cuda:{args.gpu}"
 
-    seed = args.seed + utils.get_rank()
+    device = torch.device(args.device)
+
+
+    # cudnn.benchmark = True
 
 
     # 1. Python built-in RNG
+    seed = args.seed + utils.get_rank()
     random.seed(seed)
-    # 2. NumPy RNG
     np.random.seed(seed)
-    # 3. Torch CPU RNG
     torch.manual_seed(seed)
-    # 4. Torch CUDA RNGs (if you have GPUs)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    # 5. Enforce deterministic behavior in cuDNN
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    # torch.backends.cudnn.benchmark = True
-    # torch.backends.cuda.matmul.allow_tf32 = True
-    # torch.backends.cudnn.allow_tf32 = True
-    device = torch.device(args.device)
+    cudnn.deterministic = True
+    cudnn.benchmark = False
 
+    # ----- dataset / dataloaders -----
+    using_wds = False
+    cached_subdataset = None
+    # random.seed(seed)
 
+    #cudnn.benchmark = True
+    IMAGENET_VAL_COUNT = 50000  # for printing when using WDS
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    if args.use_wds and args.data_set == 'IMNET':
+        try:
+            import webdataset as wds
+        except ImportError:
+            raise RuntimeError("Please `pip install webdataset` to use --use-wds.")
 
-    
-    def preload_subdataset(subdataset):
-        """
-        Given a small subdataset (a torch.utils.data.Subset),
-        load all (data, target) pairs into memory as a list.
-        """
-        cached = [subdataset[i] for i in range(len(subdataset))]
-        return cached
-    
-    if args.sub_dataset == 'stratified':
-        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
-        cached_subdataset = preload_subdataset(sub_dataset)
-    elif args.sub_dataset == 'random':
-        sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
-        cached_subdataset = preload_subdataset(sub_dataset)
+    #     # reuse your existing transforms (PIL -> tensor) from datasets.py
+        from datasets2 import build_transform
+
+        args.nb_classes = 1000
+        transform_train = build_transform(True, args)
+        transform_val   = build_transform(False, args)
+        import glob
+
+        # WebDataset pipelines (DDP-friendly)
+        def make_wds_pipeline(pattern, is_train):
+            shards = sorted(glob.glob(pattern))
+            if not shards:
+                raise FileNotFoundError(f"No shards matched pattern: {pattern}")
+
+            print(f"[WDS] Using {len(shards)} shards from pattern: {pattern}")
+            if dist.is_available() and dist.is_initialized():
+                world_size = dist.get_world_size()
+                rank = dist.get_rank()
+            else:
+                world_size = 1
+                rank = 0
+            shards = shards[rank::world_size]
+            print(f"[WDS] rank={rank}/{world_size} using {len(shards)} shards out of total {len(glob.glob(pattern))}",flush=True,force=True)
+            ds = (
+                wds.WebDataset(
+                    shards,
+                    # v1.x options:
+                    shardshuffle=1000 if is_train else False,   # fixes the “shardshuffle=None” warning
+                    resampled=False,
+                    nodesplitter=wds.split_by_node,             # DDP-friendly
+                    workersplitter=wds.split_by_worker,         # DataLoader workers split shards
+                    empty_check=False,                          # avoid "No samples found" hard error
+                    handler=wds.handlers.warn_and_continue,     # log & skip bad shards/samples
+                )
+                .decode("pil")
+                .to_tuple("jpg;jpeg;png", "cls")
+                .map_tuple(transform_train if is_train else transform_val, lambda y: y)
+            )
+            if is_train:
+                ds = ds.shuffle(2000)
+            return ds
+
+        dataset_train = make_wds_pipeline(args.wds_train, is_train=True)
+        dataset_val   = make_wds_pipeline(args.wds_val,   is_train=False)
+
+        # IterableDataset -> no sampler
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+            persistent_workers=(args.num_workers > 0),
+            prefetch_factor=2, 
+        )
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val,
+            #batch_size=int(1.5 * args.batch_size),
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=False,
+            persistent_workers=(args.num_workers > 0),
+        )
+        cached_subdataset = None  # indexing tricks don't apply to streaming / iterable datasets
+
+        using_wds = True
     else:
-        cached_subdataset = None
-
-
-
-
-    if args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
-
-        if args.repeated_aug:
-            sampler_train = RASampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
+        # original, unchanged path
+        dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+        dataset_val, _ = build_dataset(is_train=False, args=args)
+        using_wds = False
+        
+    
+        def preload_subdataset(subdataset):
+            """
+            Given a small subdataset (a torch.utils.data.Subset),
+            load all (data, target) pairs into memory as a list.
+            """
+            cached = [subdataset[i] for i in range(len(subdataset))]
+            return cached
+        
+        if args.sub_dataset == 'stratified':
+            sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=True)
+            cached_subdataset = preload_subdataset(sub_dataset)
+        elif args.sub_dataset == 'random':
+            sub_dataset = create_subdataset(dataset_train, batch_size=args.batch_size, sub_factor=args.sub_factor, stratified=False)
+            cached_subdataset = preload_subdataset(sub_dataset)
         else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-        if args.dist_eval:
-            if len(dataset_val) % num_tasks != 0:
-                print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                      'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                      'equal num of samples per-process.')
-            sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+            cached_subdataset = None
+
+
+        if args.distributed:
+            num_tasks = utils.get_world_size()
+            global_rank = utils.get_rank()
+
+            if args.repeated_aug:
+                sampler_train = RASampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
+            else:
+                sampler_train = torch.utils.data.DistributedSampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
+            if args.dist_eval:
+                if len(dataset_val) % num_tasks != 0:
+                    print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number.')
+                sampler_val = torch.utils.data.DistributedSampler(
+                    dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+            else:
+                sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         else:
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-    )
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, sampler=sampler_train,
+            batch_size=args.batch_size, num_workers=args.num_workers,
+            pin_memory=args.pin_mem, drop_last=True,
+        )
+        data_loader_val = torch.utils.data.DataLoader(
+            dataset_val, sampler=sampler_val,
+            batch_size=int(1.5 * args.batch_size), num_workers=args.num_workers,
+            pin_memory=args.pin_mem, drop_last=False,
+        )
 
-    # if args.ThreeAugment:
-    #     data_loader_train.dataset.transform = new_data_aug_generator(args)
 
-    data_loader_val = torch.utils.data.DataLoader(
-        dataset_val, sampler=sampler_val,
-        batch_size=int(1.5 * args.batch_size),
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=False
-    )
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
@@ -447,50 +482,39 @@ def main(args):
 
     print(f"Creating model: {args.model}")
 
-#     model = create_model(
-#     args.model,
-#     pretrained=False,
-#     num_classes=args.nb_classes,
-#     drop_rate=args.drop_rate,   # changed from --drop
-#     drop_path_rate=args.drop_path,
-#     drop_block_rate=args.drop_block,
-#     # pass our extra custom keys. You can add them here:
-#     ydrop=args.ydrop,
-#     mask_type=args.mask_type,
-#     elasticity=args.elasticity,
-#     scaler=args.scaler,
-#     n_steps=args.n_steps,
-#     transformer_mean=True,
-#     rescaling_type=args.rescaling_type,
-# )
     model = create_model(
-        args.model,
-        pretrained=False,
-        num_classes=args.nb_classes,
-        drop_rate=args.drop_rate,
-        drop_path_rate=args.drop_path,
-        # drop_block_rate=None,
-        # img_size=args.input_size
-    )
-    
-    model.n_steps = args.n_steps
-
+    args.model,
+    pretrained=False,
+    num_classes=args.nb_classes,
+    drop_rate=args.drop_rate,   # changed from --drop
+    drop_path_rate=args.drop_path,
+    drop_block_rate=args.drop_block,
+    # pass our extra custom keys. You can add them here:
+    ydrop=args.ydrop,
+    mask_type=args.mask_type,
+    elasticity=args.elasticity,
+    scaler=args.scaler,
+    n_steps=args.n_steps,
+    transformer_mean=True,
+    rescaling_type=args.rescaling_type,
+)
                     
+    ### TO CHECK: AFTER NORM
+    if args.after_norm:
+        for i,block in enumerate(model.blocks):
+            model.selected_layers[i*4 + 1] = block.norm2
 
+        for i in range(len(model.blocks)-1):
+            model.selected_layers[i*4 + 3] = model.blocks[i+1].norm1
+    if args.alt_attention_cond:
+        for i, block in enumerate(model.blocks):
+            model.selected_layers[i*4] = block.attn.qkv
 
     if args.ydrop:
         model.selected_layers = []
         model.drop_list = []
         for i, block in enumerate(model.blocks):
             block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
-            block.attn.proj_drop = MyDropout(elasticity=args.elasticity, p=args.drop_rate, tied_layer=block.attn.proj, mask_type=args.mask_type, scaler=args.scaler,
-                                transformer_mean=True,rescaling_type=args.rescaling_type)
-            block.mlp.drop1 = MyDropout(elasticity=args.elasticity, p=args.drop_rate, tied_layer=block.mlp.fc1, mask_type=args.mask_type, scaler=args.scaler,
-                                transformer_mean=True,rescaling_type=args.rescaling_type)  # Disable attention dropout
-            block.mlp.drop2 = MyDropout(elasticity=args.elasticity, p=args.drop_rate, tied_layer=block.mlp.fc2, mask_type=args.mask_type, scaler=args.scaler,
-                                transformer_mean=True,rescaling_type=args.rescaling_type)
-            #block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
-            # model.selected_layers.append(block.attn.attention_identity_layer)
             if args.after_norm:
                 model.selected_layers.append(block.norm2)
             else:
@@ -501,77 +525,17 @@ def main(args):
                 model.selected_layers.append(model.blocks[i+1].norm1)
             else:
                 model.selected_layers.append(block.mlp.fc2)
-            # model.drop_list.append(block.attn.attn_drop)
             model.drop_list.append(block.attn.proj_drop)
             model.drop_list.append(block.mlp.drop1)
             model.drop_list.append(block.mlp.drop2)
-    else:
-        for i, block in enumerate(model.blocks):
-            block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
-            block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
-            block.mlp.drop1 = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
-            block.mlp.drop2 = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
-
-
-    if args.scaled_dropout and args.ydrop:
-        rates = np.linspace(0, args.drop_rate, len(model.blocks))
-        model.drop_list = []
-        model.selected_layers = []
-        for i,block in enumerate(model.blocks):
-            if i == 0:
-                block.attn.attn_drop = torch.nn.Dropout(0.0) # Disable attention dropout
-                block.attn.proj_drop = torch.nn.Dropout(0.0)  # Disable projection dropout
-                block.mlp.drop1 = torch.nn.Dropout(0.0)  # Disable attention dropout
-                block.mlp.drop2 = torch.nn.Dropout(0.0)  # Disable projection dropout
-            else:
-                block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
-                block.attn.proj_drop = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.attn.proj, mask_type=args.mask_type, scaler=args.scaler,
-                                    transformer_mean=True,rescaling_type=args.rescaling_type)
-                block.mlp.drop1 = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.mlp.fc1, mask_type=args.mask_type, scaler=args.scaler,
-                                    transformer_mean=True,rescaling_type=args.rescaling_type)  # Disable attention dropout
-                block.mlp.drop2 = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.mlp.fc2, mask_type=args.mask_type, scaler=args.scaler,
-                                    transformer_mean=True,rescaling_type=args.rescaling_type)
-                                    
-                model.drop_list.append(block.attn.proj_drop)
-                model.drop_list.append(block.mlp.drop1)
-                model.drop_list.append(block.mlp.drop2) 
-                if args.after_norm:
-                    model.selected_layers.append(block.norm2)
-                else:
-                    model.selected_layers.append(block.attn.proj)
-                model.selected_layers.append(block.mlp.fc1)
-                if i < len(model.blocks) - 1 and args.after_norm:
-                    model.selected_layers.append(model.blocks[i+1].norm1)
-                else:
-                    model.selected_layers.append(block.mlp.fc2)
-    elif args.scaled_dropout:
-        rates = np.linspace(0, args.drop_rate, len(model.blocks))
-        for i,block in enumerate(model.blocks):
-            if i == 0:
-                block.attn.attn_drop = torch.nn.Dropout(0.0) # Disable attention dropout
-                block.attn.proj_drop = torch.nn.Dropout(0.0)  # Disable projection dropout
-                block.mlp.drop1 = torch.nn.Dropout(0.0)  # Disable attention dropout
-                block.mlp.drop2 = torch.nn.Dropout(0.0)  # Disable projection dropout
-            else:
-                block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
-                block.attn.proj_drop =  torch.nn.Dropout(rates[i])
-                block.mlp.drop1 = torch.nn.Dropout(rates[i])
-                block.mlp.drop2 = torch.nn.Dropout(rates[i])
-
-
 
     
-    # for i, block in enumerate(model.blocks):
-        
-    #     block.mlp.drop1 = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
-    #     block.mlp.drop2 = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout   
-    #     model.selected_layers.append(block.attn.attention_identity_layer)
-    #     model.selected_layers.append(block.norm2)
-    #     model.drop_list.append(block.attn.attn_drop)
-    #     model.drop_list.append(block.attn.proj_drop)
 
 
     #added
+    for i, block in enumerate(model.blocks):
+        print(f"Block {i}: {block.attn.attn_drop}, {block.attn.proj_drop}, {block.mlp.drop1}, {block.mlp.drop2}")
+        print(f"Block {i}: {block.norm1}, {block.norm2}, {block.drop_path1}, {block.drop_path2}")
 
 
     # TODO: finetuning
@@ -592,15 +556,14 @@ def main(args):
             resume='')
 
 
-    # model_without_ddp = model
-    # if args.distributed:
-    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-    #     model_without_ddp = model.module
+
     ##GPT CHANGES###
     model_without_ddp = model
     if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-            model_without_ddp = model.module
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
+        if dist is not None and dist.is_initialized():
+            dist.barrier()
     ###############    
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -608,29 +571,25 @@ def main(args):
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
     print("base lr: %.2e" % (args.lr))
+
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
-
     lr_scheduler, _ = create_scheduler(args, optimizer)
 
     criterion = LabelSmoothingCrossEntropy()
 
-    if mixup_active:
+    if args.mixup > 0.:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
-        model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
-        
-
-        # model_without_ddp.criter = PerSampleSoftTargetCE()
         #model_without_ddp.criter = LabelSmoothingCrossEntropyNoRed(smoothing=args.smoothing)
+
     elif args.smoothing:
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
-        model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
-        # model_without_ddp.criter = LabelSmoothingCrossEntropyNoRed(smoothing=args.smoothing)
+        #model_without_ddp.criter = LabelSmoothingCrossEntropyNoRed(smoothing=args.smoothing)
+
     else:
         criterion = torch.nn.CrossEntropyLoss()
         model_without_ddp.criter = torch.nn.CrossEntropyLoss(reduction='none')
-    model_without_ddp.crit_for = MethodType(crit_for, model_without_ddp)
 
     args.experiment_name = f"{args.experiment_name}_seed{args.seed}"
 
@@ -708,20 +667,13 @@ def main(args):
         return
 
     print("Start training")
-    print("model", model_without_ddp)
     #initially normal dropout
     if args.ydrop:
         if hasattr(model, 'module'):
-            for drop in model.module.drop_list:
-                if isinstance(drop, MyDropout):
-                    drop.use_normal_dropout()
-            # model.module.use_normal_dropout()
+            model.module.use_normal_dropout()
         else:
-            for drop in model.drop_list:
-                if isinstance(drop, MyDropout):
-                    drop.use_normal_dropout()
+            model.use_normal_dropout() 
 
-    check = False
     if args.stats:
         stats_dir = os.path.join(output_dir, "stats")
         stats_dir2 = os.path.join(output_dir, "stats_minmax")
@@ -745,10 +697,9 @@ def main(args):
         tracker_post_minmax = None
 
 
-    delta  = 0.1   # required improvement (use 10.0 if acc is in [0,100])
+    check = False
     alive = True            # your boolean that flips
-    anchor_best = None      # best accuracy at the start of the current window
-    anchor_epoch = None 
+
 
     for epoch in range(saved_epoch, args.epochs):
         save_this_epoch = args.stats and ((epoch % args.epoch_gap) == 0 or epoch == args.epochs - 1)
@@ -762,29 +713,22 @@ def main(args):
             check = False
             if args.ydrop:
                 if hasattr(model, 'module'):
-                    for drop in model.module.drop_list:
-                        if isinstance(drop, MyDropout):
-                            drop.use_normal_dropout()
-                    # model.module.use_normal_dropout()
+                    model.module.use_normal_dropout()
                 else:
-                    for drop in model.drop_list:
-                        if isinstance(drop, MyDropout):
-                            drop.use_normal_dropout()
+                    model.use_normal_dropout()
+        elif (args.ydrop or args.ypath) and epoch >= args.annealing_factor:
 
-        elif args.ydrop and epoch >= args.annealing_factor:
             if args.ydrop:
                 if hasattr(model, 'module'):
-                    for drop in model.module.drop_list:
-                        if isinstance(drop, MyDropout):
-                            drop.use_ydrop()
+                    model.module.use_ydrop()
                 else:
-                    for drop in model.drop_list:
-                        if isinstance(drop, MyDropout):
-                            drop.use_ydrop()
+                    model.use_ydrop() 
             check = True
 
 
-        if args.distributed:
+        
+        if args.distributed and not using_wds:
+            # only for map-style datasets with DistributedSampler
             data_loader_train.sampler.set_epoch(epoch)
 
         max_norm = None if (args.clip_grad is None or args.clip_grad <= 0) else float(args.clip_grad)
@@ -805,15 +749,18 @@ def main(args):
             update_batches=args.update_batches,
             tracker=[tracker, tracker_post_minmax] if save_this_epoch else None,   # NEW
             scoring_type = args.scoring_type,
+            same_batch = args.same_batch,
             help_par = 1,
             noisy_dropout = args.noisy_dropout,
             update_data_loader = cached_subdataset,
             min_dropout=args.min_dropout,
             alt_attention_cond=args.alt_attention_cond,
             mask_type=args.mask_type,
-            ypath= False,
+            ypath= args.ypath,
+            support_loader=None,
             conductance_batch_size =args.conductance_batch_size,
             mode = args.mode,
+            no_attn = args.no_attn
         )
 
         
@@ -824,8 +771,8 @@ def main(args):
 
 
         test_stats = evaluate(data_loader_val, model, device)
-        #val_count = IMAGENET_VAL_COUNT if using_wds else len(dataset_val)
-        #print(f"Accuracy of the network on the {val_count} test images: {test_stats['acc1']:.1f}%")
+        val_count = IMAGENET_VAL_COUNT if using_wds else len(dataset_val)
+        print(f"Accuracy of the network on the {val_count} test images: {test_stats['acc1']:.1f}%") #,flush=True,force=True)
         test_acc = test_stats.get('acc1', 0.0)
         test_loss = test_stats.get('loss', 0.0)
         
@@ -840,14 +787,13 @@ def main(args):
 
         # if args.switch_epochs is not None and args.ydrop and epoch >= args.switch_epochs:
         #     alive = False
-        ema_state = get_state_dict(model_ema) if model_ema is not None else None
-
+            
         checkpoint ={
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
-                'model_ema': ema_state,
+                'model_ema': get_state_dict(model_ema),
                 'loss_scaler': loss_scaler.state_dict() if loss_scaler is not None else None,
                 'args': args,
                 'test_acc': test_acc,
@@ -871,7 +817,7 @@ def main(args):
             checkpoint['patience_counter'] = patience_counter
                  
         print(f"Epoch {epoch+1}/{args.epochs}: Train Loss {train_stats['loss']:.4f}, "
-              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")
+              f"Test Acc {test_stats.get('acc1', 0):.2f}%, Epoch Time {epoch_time:.2f}s, Patience Counter {patience_counter}")#,flush=True,force=True)
         
         if args.output_dir:
             utils.save_on_master(checkpoint, output_dir / 'checkpoint.pth')

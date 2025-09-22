@@ -84,9 +84,9 @@ def update_drop_path_rates(scoring,drop_rate = 0.1,
 
 
     if rescaling_type == "linear":
-        drop_prob = linear_compression(raw_drop, min_dropout, 0.7)
+        drop_prob = linear_compression(raw_drop, min_dropout, 0.4)
     else:
-        drop_prob = raw_drop.clamp(min_dropout, 0.7)
+        drop_prob = raw_drop.clamp(min_dropout, 0.4)
 
     return drop_prob
 
@@ -128,7 +128,7 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training, self.scale_by_keep, self.newprob)
     def update_params(self, drop_prob: float = 0., elasticity: float = 0., curr = False):
         self.drop_prob = (1- elasticity) * self.drop_prob + drop_prob * elasticity
-        print(f"New rate {drop_prob}, Updated drop_prob: {self.drop_prob}")
+        # print(f"New rate {drop_prob}, Updated drop_prob: {self.drop_prob}")
         if curr:
             self.newprob = drop_prob
     def extra_repr(self):

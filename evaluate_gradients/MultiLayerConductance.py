@@ -71,7 +71,7 @@ class MultiLayerConductance(LayerAttribution, GradientAttribution):
         else:
             self.layer = layer
         self.geodesic = geodesic
-        LayerAttribution.__init__(self, forward_func, layer, device_ids)
+        LayerAttribution.__init__(self, forward_func, self.layer, device_ids)
         GradientAttribution.__init__(self, forward_func)
 
 

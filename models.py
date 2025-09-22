@@ -1,452 +1,100 @@
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
-#
-# This source code is licensed under the CC-by-NC license found in the
-# LICENSE file in the root directory of this source tree.
-#
 import torch
 import torch.nn as nn
 from functools import partial
-from torch.jit import Final
-from typing import Type, Optional
-import torch.nn.functional as F
-import copy
-from typing import Iterable
-from captum.attr import LayerConductance
-from evaluate_gradients.MultiLayerConductance import MultiLayerConductance   
-from evaluate_gradients.MultiLayerSensitivity import MultiLayerSensitivity
-from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
-from timm.models import register_model
-from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
 
-from updated_transformer.block import Block
-from updated_transformer.mlp import Mlp
-"""DropPath and LayerScale may need changes"""
-import gc
+from timm.models.vision_transformer import VisionTransformer, _cfg
+from timm.models.registry import register_model
+from timm.models.layers import trunc_normal_
 
-from timm.models.vision_transformer import VisionTransformer
-import torch
-import torch.nn as nn
 
-class MyVisionTransformer(VisionTransformer):
-    """
-    A subclass of timm's VisionTransformer that uses custom transformer blocks
-    (with integrated conductance computation) for updating dropout masks.
-    """
-    def __init__(self, *args, n_steps: int = 5, **kwargs):
-        super(MyVisionTransformer, self).__init__(*args, **kwargs)
-        self.n_steps = n_steps  # number of interpolation steps for conductance
-        # Ensure that self.blocks is built using your custom block_fn that implements
-        # update_dropout_masks, e.g., MyTransformerBlock.
-        self.drop_list = []
-        self.selected_layers = []
-        self.scores = {}
-        self.criter = nn.CrossEntropyLoss(reduction='none')
-        for block in self.blocks:
-            for module in block.drop_list:
-                self.drop_list.append(module)
-            for layer in block.selected_layers:
-                self.selected_layers.append(layer)
+__all__ = [
+    'deit_tiny_patch16_224', 'deit_small_patch16_224', 'deit_base_patch16_224',
+    'deit_tiny_distilled_patch16_224', 'deit_small_distilled_patch16_224',
+    'deit_base_distilled_patch16_224', 'deit_base_patch16_384',
+    'deit_base_distilled_patch16_384',
+]
 
-    def crit_for(self,x, y_true):
-        """
-        Set the criterion for the model.
-        This is used to compute loss during training.
-        """
-        logits = self.forward(x)        # [B, C]
-        # ensure self.criter is on the right device
-        self.criter = self.criter.to(logits.device)
-        # compute per‐sample loss
-        loss_per_sample = self.criter(logits, y_true)
-        # shape = [B], exactly what Captum needs
-        return loss_per_sample
-    
-    def use_normal_dropout(self):
-        for drop in self.drop_list:
-            drop.use_normal_dropout()
 
-    def use_ydrop(self):
-        for drop in self.drop_list:
-            drop.use_ydrop()
+class DistilledVisionTransformer(VisionTransformer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        num_patches = self.patch_embed.num_patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 2, self.embed_dim))
+        self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
-    def plot_aggregated_statistics(self, epoch_label, save_dir=None):
-        for i,_ in enumerate(self.drop_list):
-            block_num = i//4
-            layer_num = i%4 
-            self.drop_list[i].plot_aggregated_statistics(epoch_label+f" Block {block_num} layer{layer_num}", save_dir)
+        trunc_normal_(self.dist_token, std=.02)
+        trunc_normal_(self.pos_embed, std=.02)
+        self.head_dist.apply(self._init_weights)
 
-    def update_progression(self,save_dir):
-        for i,_ in enumerate(self.drop_list):
-            block_num = i//4
-            layer_num = i%4
-            self.drop_list[i].update_progression(save_dir,f"block{block_num}_layer{layer_num}")
- 
-    def plot_progression_statistics(self, save_dir=None,label =''):
-        for i,_ in enumerate(self.drop_list):
-            block_num = i//4
-            layer_num = i%4
-            self.drop_list[i].plot_progression_statistics(save_dir,label =label + f" Block_{block_num}_layer_{layer_num}")
-    def save_statistics(self, save_dir):
-        for i,_ in enumerate(self.drop_list):
-            block_num = i//4
-            layer_num = i%4
-            self.drop_list[i].save_statistics(save_dir, layer_label = f"block{block_num}_layer{layer_num}")
-    def clear_progression(self):
-        for drop in self.drop_list:
-            drop.clear_progression()
-    def plot_current_stats(self, epoch,batch_idx, save_dir):
-        for i,_ in enumerate(self.drop_list):
-            self.drop_list[i].plot_current_stats(epoch,batch_idx, save_dir, i,True)
+    def forward_features(self, x):
+        # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
+        # with slight modifications to add the dist_token
+        B = x.shape[0]
+        x = self.patch_embed(x)
 
-    def calculate_scores(self, batches: Iterable, device: torch.device,stats = True,
-                         scoring_type = "Conductance",noisy_score = False,noisy_dropout = False,
-                         min_dropout =0.0,alt_attention_cond = False,sm = True) -> None:
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        dist_token = self.dist_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, dist_token, x), dim=1)
 
-        self.eval()
-        orig_reqs = []
-        for p in self.parameters():
-            orig_reqs.append(p.requires_grad)
-            p.requires_grad_(False)
-        # Also make sure no stale weight‐grads are sitting around
-        self.zero_grad()  
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
 
-        if scoring_type == "Conductance":
-            mlc = MultiLayerConductance(self, self.selected_layers)
-        elif scoring_type == "Conductance_alt":
-            mlc = MultiLayerConductance(self.crit_for, self.selected_layers)
-        elif scoring_type == "Sensitivity":
-            mlc = MultiLayerSensitivity(self, self.selected_layers)
+        for blk in self.blocks:
+            x = blk(x)
+
+        x = self.norm(x)
+        return x[:, 0], x[:, 1]
+
+    def forward(self, x):
+        x, x_dist = self.forward_features(x)
+        x = self.head(x)
+        x_dist = self.head_dist(x_dist)
+        if self.training:
+            return x, x_dist
         else:
-            print("Invalid scoring type. Using Conductance as default.")
-            mlc = MultiLayerConductance(self, self.selected_layers)
-
-        # Initialize conductances for each layer
-        for i, _ in enumerate(self.selected_layers):
-            self.scores[f'drop_{i}'] = None
-
-        for x, y_batch in batches:
-
-            x_captum = x.detach().clone().requires_grad_()
-            x_captum = x_captum.to(device, non_blocking=True)
-            baseline = torch.zeros_like(x_captum)
-
-            y_batch = y_batch.to(device, non_blocking=True)
-
-            # Get model predictions
-            outputs = self(x_captum)
-            pred = outputs.argmax(dim=1)
-            if scoring_type == "Conductance_alt":
-                captum_out = mlc.attribute(
-                    x_captum, baselines=baseline, target=None,
-                    n_steps=self.n_steps,
-                    internal_batch_size=None,
-                    additional_forward_args=(y_batch,),
-                    return_convergence_delta=False,
-                    attribute_to_layer_input=False,
-                    grad_kwargs={"retain_graph": False},
-                )
-            else:
-                captum_out = mlc.attribute(
-                x_captum, baselines=baseline, target=pred,
-                n_steps=self.n_steps,
-                internal_batch_size=None,
-                return_convergence_delta=False,
-                attribute_to_layer_input=False,
-                grad_kwargs={"retain_graph": False},
-            )
-
-            if isinstance(captum_out, list):
-                captum_attrs = [t.detach() for t in captum_out]
-            elif isinstance(captum_out, tuple):
-                captum_attrs = tuple(t.detach() for t in captum_out)
-            else:
-                captum_attrs = [captum_out.detach()]
-            # Average out the conductance across the batch and add it
-            for i, score in enumerate(captum_attrs):
-                #score_mean = score.mean(dim=0)
-                #score_mean = score if scoring_type == "Sensitivity" else score.sum(dim=0)
-                if scoring_type == "Sensitivity":
-                    score_mean = score
-                elif sm:
-                    score_mean = score.sum(dim =0)
-                else:
-                    score_mean = score.mean(dim=0)
-
-                if self.scores[f'drop_{i}'] is None:
-                    # First time: initialize with the computed score_mean
-                    self.scores[f'drop_{i}'] = score_mean.clone()
-                else:
-                    # Accumulate the score_mean
-                    self.scores[f'drop_{i}'] += score_mean
-                
-        # Update the dropout masks based on the accumulated conductances
-        for i, drop_layer in enumerate(self.drop_list):
-            score = self.scores[f'drop_{i}'] / float(len(batches))
-            if alt_attention_cond and (i % 4 == 0):
-                N = score.shape[0]  # Number of tokens
-                qkv = score.reshape(N, 3, self.blocks[i // 4].attn.num_heads, self.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
-                q, k, v = qkv.unbind(0)
-                q, k = self.blocks[i // 4].attn.q_norm(q), self.blocks[i // 4].attn.k_norm(k)
-                q = q * self.blocks[i // 4].attn.scale
-                score = q @ k.transpose(-2, -1)
-            if noisy_score:
-                #eps =torch.finfo(x.dtype).eps    # ~1.19e-07 for float32
-                
-                noise = (torch.rand_like(score) - 0.5) * 2 * (score.abs()+10**-4)*0.1#+-10% maximum
-                mask = (torch.rand_like(score) < 0.3).float()
-
-                score = score + (mask*noise)
-
-                # Use the attention identity layer for the first layer of each block
-                
-            drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)
-
-
-        #load the update on the model from the copy
-      
-        for p, req in zip(self.parameters(), orig_reqs):
-            p.requires_grad_(req)
-        torch.cuda.empty_cache()
-
-
-        self.train()
-
-
-
+            # during inference, return the average of both classifier predictions
+            return (x + x_dist) / 2
 
 
 @register_model
 def deit_tiny_patch16_224(pretrained=False, **kwargs):
-    # Remove extra keys that timm might not want
-    kwargs.pop('pretrained_cfg', None)
-    kwargs.pop('pretrained_cfg_overlay', None)
-    kwargs.pop('cache_dir', None)
-
-    # Extract relevant dropout / custom-dropout params
-    drop = kwargs.pop('drop_rate', 0.0)
-    ydrop = kwargs.pop('ydrop', True)
-    mask_type = kwargs.pop('mask_type', 'sigmoid')
-    elasticity = kwargs.pop('elasticity', 0.01)
-    scaler = kwargs.pop('scaler', 1.0)
-    n_steps = kwargs.pop('n_steps', 5)
-    transformer_mean = kwargs.pop('transformer_mean', False)
-    rescaling_type = kwargs.pop('rescaling_type', None)
-
-    print("[Registered Model - Tiny] drop_rate:", drop)
-    print("[Registered Model - Tiny] ydrop:", ydrop)
-    print("[Registered Model - Tiny] mask_type:", mask_type)
-    print("[Registered Model - Tiny] elasticity:", elasticity)
-    print("[Registered Model - Tiny] scaler:", scaler)
-    print("[Registered Model - Tiny] n_steps:", n_steps)
-    print("[Registered Model - Tiny] transformer_mean:", transformer_mean)
-    print("[Registered Model - Tiny] rescaling_type:", rescaling_type)  
-
-    from functools import partial
-    from updated_transformer.block import Block
-    from updated_transformer.mlp import Mlp
-
-    # Create partial constructors for your custom Block & Mlp
-    block_partial = partial(
-        Block,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        attn_drop=drop,
-        proj_drop=drop,
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-    mlp_partial = partial(
-        Mlp,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        drop=drop,  # Use the same drop or separate if desired
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-
-    # Build MyVisionTransformer using your partials
-    model = MyVisionTransformer(
-        patch_size=16,
-        embed_dim=192,
-        depth=12,
-        num_heads=3,
-        mlp_ratio=4,
-        qkv_bias=True,
-        block_fn=block_partial,
-        mlp_layer=mlp_partial,
-        n_steps=n_steps,
-        proj_drop_rate=drop,
-        attn_drop_rate=drop,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
-    )
+    model = VisionTransformer(
+        patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
-
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_tiny_patch16_224-a1311bcf.pth",
             map_location="cpu", check_hash=True
         )
         model.load_state_dict(checkpoint["model"])
-
     return model
 
 
 @register_model
 def deit_small_patch16_224(pretrained=False, **kwargs):
-    # Remove extra keys that timm might not want
-    kwargs.pop('pretrained_cfg', None)
-    kwargs.pop('pretrained_cfg_overlay', None)
-    kwargs.pop('cache_dir', None)
-
-    # Extract relevant dropout / custom-dropout params
-    drop = kwargs.pop('drop_rate', 0.0)
-    ydrop = kwargs.pop('ydrop', True)
-    mask_type = kwargs.pop('mask_type', 'sigmoid')
-    elasticity = kwargs.pop('elasticity', 0.01)
-    scaler = kwargs.pop('scaler', 1.0)
-    n_steps = kwargs.pop('n_steps', 5)
-    transformer_mean = kwargs.pop('transformer_mean', False)
-    rescaling_type = kwargs.pop('rescaling_type', None)  #
-
-    print("[Registered Model - Small] drop_rate:", drop)
-    print("[Registered Model - Small] ydrop:", ydrop)
-    print("[Registered Model - Small] mask_type:", mask_type)
-    print("[Registered Model - Small] elasticity:", elasticity)
-    print("[Registered Model - Small] scaler:", scaler)
-    print("[Registered Model - Small] n_steps:", n_steps)
-    print("[Registered Model - Small] transformer_mean:", transformer_mean)
-    print("[Registered Model - Small] rescaling_type:", rescaling_type)  # Print rescaling type if used
-
-    from functools import partial
-    from updated_transformer.block import Block
-    from updated_transformer.mlp import Mlp
-
-    # Create partial constructors for your custom Block & Mlp
-    block_partial = partial(
-        Block,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        attn_drop=drop,
-        proj_drop=drop,
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-    mlp_partial = partial(
-        Mlp,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        drop=drop,
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-
-    # Build MyVisionTransformer using your partials
-    model = MyVisionTransformer(
-        patch_size=16,
-        embed_dim=384,
-        depth=12,
-        num_heads=6,
-        mlp_ratio=4,
-        qkv_bias=True,
-        block_fn=block_partial,
-        mlp_layer=mlp_partial,
-        n_steps=n_steps,
-        proj_drop_rate=drop,
-        attn_drop_rate=drop,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
-    )
+    model = VisionTransformer(
+        patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
-
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth",
             map_location="cpu", check_hash=True
         )
         model.load_state_dict(checkpoint["model"])
-
     return model
 
 
 @register_model
 def deit_base_patch16_224(pretrained=False, **kwargs):
-    # Remove extra keys that timm might not want
-    kwargs.pop('pretrained_cfg', None)
-    kwargs.pop('pretrained_cfg_overlay', None)
-    kwargs.pop('cache_dir', None)
-
-    drop = kwargs.pop('drop_rate', 0.0)
-    ydrop = kwargs.pop('ydrop', True)
-    mask_type = kwargs.pop('mask_type', 'sigmoid')
-    elasticity = kwargs.pop('elasticity', 0.01)
-    scaler = kwargs.pop('scaler', 1.0)
-    n_steps = kwargs.pop('n_steps', 5)
-    transformer_mean = kwargs.pop('transformer_mean', False)
-    rescaling_type = kwargs.pop('rescaling_type', None)  #
-
-
-    print("[Registered Model] drop_rate:", drop)
-    print("[Registered Model] ydrop:", ydrop)
-    print("[Registered Model] mask_type:", mask_type)
-    print("[Registered Model] elasticity:", elasticity)
-    print("[Registered Model] scaler:", scaler)
-    print("[Registered Model] n_steps:", n_steps)
-    print("[Registered Model] transformer_mean:", transformer_mean)
-    print("[Registered Model] rescaling_type:", rescaling_type)  # Print rescaling type if used
-
-    from functools import partial
-    from updated_transformer.block import Block
-    from updated_transformer.mlp import Mlp
-
-    # Make partial constructors
-    block_partial = partial(
-        Block,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        attn_drop=drop,
-        proj_drop=drop,
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-    mlp_partial = partial(
-        Mlp,
-        ydrop=ydrop,
-        mask_type=mask_type,
-        elasticity=elasticity,
-        scaler=scaler,
-        drop=drop,  # use the same drop for MLP as well, or pass differently
-        transformer_mean=transformer_mean,  # Pass transformer
-        rescaling_type=rescaling_type,  # Pass rescaling type
-    )
-
-    model = MyVisionTransformer(
-        patch_size=16,
-        embed_dim=768,
-        depth=12,
-        num_heads=12,
-        mlp_ratio=4,
-        qkv_bias=True,
-        block_fn=block_partial,
-        mlp_layer=mlp_partial,
-        n_steps=n_steps,
-        proj_drop_rate=drop,
-        attn_drop_rate=drop,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        **kwargs
-    )
+    model = VisionTransformer(
+        patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
-
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(
             url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
@@ -455,3 +103,77 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         model.load_state_dict(checkpoint["model"])
     return model
 
+
+@register_model
+def deit_tiny_distilled_patch16_224(pretrained=False, **kwargs):
+    model = DistilledVisionTransformer(
+        patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_tiny_distilled_patch16_224-b40b3cf7.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+@register_model
+def deit_small_distilled_patch16_224(pretrained=False, **kwargs):
+    model = DistilledVisionTransformer(
+        patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_small_distilled_patch16_224-649709d9.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+@register_model
+def deit_base_distilled_patch16_224(pretrained=False, **kwargs):
+    model = DistilledVisionTransformer(
+        patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_224-df68dfff.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+@register_model
+def deit_base_patch16_384(pretrained=False, **kwargs):
+    model = VisionTransformer(
+        img_size=384, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_384-8de9b5d1.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+@register_model
+def deit_base_distilled_patch16_384(pretrained=False, **kwargs):
+    model = DistilledVisionTransformer(
+        img_size=384, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_384-d0272ac0.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model

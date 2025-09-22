@@ -12,6 +12,7 @@ import os
 import sys
 from typing import Iterable, Optional
 import torch.nn.functional as F
+import torch.distributed as dist
 
 import torch
 import numpy as np
@@ -26,7 +27,24 @@ from updated_transformer.dynamic_dropath import update_drop_path_rates
 import utils
 import json
 import itertools
+import torch.distributed as dist
 
+def _ddp_is_on():
+    return dist.is_available() and dist.is_initialized()
+
+@torch.no_grad()
+def _ddp_avg_scores_(scores: dict):
+    """
+    In-place all-reduce (mean) of every tensor value in `scores`.
+    Assumes same keys and shapes on all ranks.
+    """
+    if not _ddp_is_on():
+        return scores
+    ws = dist.get_world_size()
+    for k, v in scores.items():
+        dist.all_reduce(v, op=dist.ReduceOp.SUM)
+        v.div_(ws)
+    return scores
 
 def get_random_batch(cached_data, batch_size):
     """
@@ -50,55 +68,45 @@ def get_random_batch(cached_data, batch_size):
 
 #added
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
-                    data_loader: Iterable,support_loader: Iterable, optimizer: torch.optim.Optimizer,
+                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,check:bool=False,
                     update_freq:int=1,update_batches:int =5, tracker =None, update_data_loader= None,
-                    trans_mean=False,scoring_type:str ="Conductance",same_batch = False,help_par:int =1,
+                    mode =None,scoring_type:str ="Conductance",help_par:int =1,
                     noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid"
-                    ,ypath = False,conductance_batch_size:int = 32) -> dict:
+                    ,ypath = False,conductance_batch_size:int = 32,) -> dict:
     #added
    
     # TODO fix this for finetuning
     model.train()
-    criterion.train()
+    criterion.train() ## not there in original
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 200
-    if tracker is not None:
-        tracker_normal = tracker[0]
-        tracker_minmax = tracker[1]
+    tracker_normal = tracker[0] if (tracker is not None and len(tracker) >= 1) else None
+    tracker_minmax = tracker[1] if (tracker is not None and len(tracker) >= 2) else None
     # Wrap one of them with the metric logger for training.
     logged_iter = metric_logger.log_every(data_loader, print_freq, header)
-    #new_iter = iter(data_loader)
 
-    # if check and (not same_batch) and (update_data_loader == None):
-        # Create a new iterator for the data loader.
-    if support_loader is not None:
-        # Use the support_loader to get the next batches.
-        new_iter = iter(support_loader)
-    else:
-        new_iter = iter(data_loader)
 
+    #new_iter = iter(support_loader) if support_loader is not None else iter(data_loader)
+    #new_iter = iter(data_loader)    
+    
     for batch_idx, (samples, targets) in enumerate(logged_iter):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
+        # print("Batch idx:", batch_idx)
 
         #print('batch_idx:', batch_idx)
         with torch.amp.autocast('cuda'):
-            #if check and (batch_idx % update_freq == 0):
-            if check or (tracker is not None):
+            do_update = check and (batch_idx % update_freq == 0)
+            do_log    = (tracker_normal is not None)
+            if do_update or do_log:
                 # Get the next update_batches batches.
                 if update_data_loader == None:
                     next_batches = []
-                    if same_batch:
-                        bs,bt = samples, targets
-                    else:
-                        bs, bt = next(new_iter)
-
+                    bs,bt = samples, targets
                     sample_chunks = bs.split(conductance_batch_size)
                     target_chunks = bt.split(conductance_batch_size)
                     nb = min(update_batches, len(sample_chunks))
@@ -108,66 +116,58 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     next_batches = []
                     for _ in range(update_batches):
                         # Get a random batch from the preloaded cached_subdataset.
-                        sub_samples, sub_targets = get_random_batch(update_data_loader, batch_size=32)  # Use desired sub batch size (e.g. 32)
+                        sub_samples, sub_targets = get_random_batch(update_data_loader, batch_size=conductance_batch_size)  # Use desired sub batch size (e.g. 32)
                         # Move the subbatch to device.
                         sub_samples = sub_samples.to(device, non_blocking=True)
                         sub_targets = sub_targets.to(device, non_blocking=True)
                         next_batches.append((sub_samples, sub_targets))
 
                 
-                if mask_type == "sigmoid":
-                    sm = False
-                else:
-                    sm = True
-                #added
-                if ypath:
-                    selected_layers = model.module.ypath_layers if hasattr(model, 'module') else model.ypath_layers
-                else:
-                    selected_layers = model.module.selected_layers if hasattr(model, 'module') else model.selected_layers
 
-                if hasattr(model, 'module'):
-                    scores,means = calculate_scores(model.module,
-                                        next_batches, device, scoring_type=scoring_type, transformer=trans_mean,
-                                        normalization=False, sm=sm, selected_layers=selected_layers)
-                else:
-                    scores,means = calculate_scores(model,
-                                        next_batches, device, scoring_type=scoring_type, transformer=trans_mean,
-                                        normalization=False, sm=sm, selected_layers=selected_layers)
-                
-                if tracker is not None:
-                    tracker_normal.update(scores)
-                    scores_min_max = {}
-                    for i,scor in scores.items():
-                        sf = -scor
-                        epsilon = torch.finfo(sf.dtype).eps
-                        s_min, s_max = sf.min(), sf.max()
-                        normalized = 2 * (sf - s_min) / (s_max - s_min + epsilon) - 1
-                        scores_min_max[i] = normalized
-                    tracker_minmax.update(scores_min_max)
+                selected_layers = model.module.selected_layers if hasattr(model, 'module') else model.selected_layers
+                # print((len(selected_layers), "selected layers for scoring"))
+                # print(("Calculating scores with", len(next_batches), "batches"))
+                # print(("Scoring type:", scoring_type))
+                # print(len(model.drop_list) if hasattr(model, 'drop_list') else len(model.module.drop_list), "drop_list length")
+                scores,_ = calculate_scores(
+                    model.module if hasattr(model, 'module') else model,
+                    next_batches, device, scoring_type=scoring_type, mode=mode,
+                    normalization=False, sm=False, selected_layers=selected_layers, ypath=ypath
+                )
+                _ddp_avg_scores_(scores)
+                # print(("Scores:", [ (k, v.shape if isinstance(v, torch.Tensor) else v) for k,v in scores.items() ]))
 
-                if ypath and check and (batch_idx % update_freq == 0):
-                    elasticity = model.module.elasticity if hasattr(model, 'module') else model.elasticity
-                    drop_path_rate = model.module.drop_path_rate if hasattr(model, 'module') else model.drop_path_rate
-                    means_torch = torch.stack([
-                        torch.tensor(m, device=device) for m in means
-                    ], dim=0)
+                if do_log:
+                    with torch.no_grad():
+                        tracker_normal.update(scores)
+                        scores_min_max = {}
+                        for i, scor in scores.items():
+                            sf = -scor
+                            eps = torch.finfo(sf.dtype).eps
+                            s_min, s_max = sf.min(), sf.max()
+                            denom = s_max - s_min
+                            normalized = (2 * (sf - s_min) / (denom + eps) - 1) if torch.isfinite(denom) and (denom > 0) \
+                                        else torch.zeros_like(sf)
+                            scores_min_max[i] = normalized
+                        tracker_minmax.update(scores_min_max)
 
-                    new_rates  = update_drop_path_rates(means_torch,drop_rate=drop_path_rate
-                                                                    ,mask_type=mask_type,min_dropout=min_dropout,
-                                                                rescaling_type=None)
-                    for i, block in enumerate(model.module.blocks if hasattr(model, 'module') else model.blocks):
-                        print(f"Block {i} - attn")
-                        block.drop_path1.update_params(drop_prob=new_rates[2*i], elasticity=elasticity,curr =False)
-                        print(f"Block {i} - mlp")
-                        block.drop_path2.update_params(drop_prob=new_rates[2*i+1], elasticity=elasticity,curr = False)
-                elif check and (batch_idx % update_freq == 0):
-                    update_dropout_masks(model = model.module if hasattr(model, 'module') else model,
-                                        scores=scores, drop_list=None,
-                                        min_dropout=min_dropout, noisy_dropout=noisy_dropout,
-                                        stats=False, alt_attention_cond=alt_attention_cond,)
+
+                if do_update:
+                    update_dropout_masks(
+                        model = model.module if hasattr(model, 'module') else model,
+                        scores = scores, drop_list=None,
+                        min_dropout=min_dropout, noisy_dropout=noisy_dropout,
+                        stats=False, alt_attention_cond=alt_attention_cond,
+                    )
+
+                # if _ddp_is_on():
+                #     dist.barrier()
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
 
             outputs = model(samples)
             loss = criterion(outputs, targets)
+            #loss = criterion(samples, outputs, targets)
           
 
 
@@ -198,9 +198,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         if model_ema is not None:
             model_ema.update(model)
+        # if lr_scheduler is not None and hasattr(lr_scheduler, "step_update"):
+        #     # use a simple global update counter
+        #     lr_scheduler.step_update(epoch * len(data_loader) + batch_idx)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -236,7 +240,7 @@ def evaluate(data_loader, model, device):
         metric_logger.update(loss=loss.item())
         metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-
+    metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
@@ -275,8 +279,7 @@ def prune_and_train(model: torch.nn.Module, criterion: torch.nn.Module,
         logged_iter = metric_logger.log_every(data_loader, print_freq, header)
 
         for batch_idx, (samples, targets) in enumerate(logged_iter):
-            if batch_idx >5:
-                break
+
             samples = samples.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
             if mixup_fn is not None:

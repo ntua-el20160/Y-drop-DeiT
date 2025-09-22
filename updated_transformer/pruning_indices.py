@@ -20,19 +20,24 @@ from timm.layers import PatchEmbed, use_fused_attn, DropPath, trunc_normal_
 
 from updated_transformer.block import Block
 from updated_transformer.mlp import Mlp
+from captum.attr import LayerConductance
+
 def calculate_scores(
         model: torch.nn.Module,
         batches: Iterable,
         device: torch.device,
         scoring_type: str = "Conductance",
-        transformer: bool = False,
-        normalization: bool = True,
+        mode: bool = None,
+        normalization: bool = False,
         selected_layers: Optional[List[int]] = None,
-        sm = True) -> Dict[int, torch.Tensor]:
+        sm = False,
+        ypath = False,
+        no_attn = False) -> Dict[int, torch.Tensor]:
     # 1) --- ensure model is in eval mode and gradients are disabled
     model.eval()
     if selected_layers is  None:
         selected_layers = model.selected_layers
+
 
     # 2) --- save original requires_grad settings
     orig_reqs = []
@@ -41,7 +46,6 @@ def calculate_scores(
         p.requires_grad_(False)
     model.zero_grad()
     new_scores = {}
-
     # 3) --- select scoring type for the layers
     if scoring_type == "Conductance":
         mlc = MultiLayerConductance(model, selected_layers)
@@ -54,16 +58,25 @@ def calculate_scores(
         mlc = MultiLayerConductance(model, selected_layers)
 
     # 4) --- iterate over batches
+    batch_count = 0
     for x, y_batch in batches:
+            batch_count += 1
             # 5) --- ensure x is on the correct device and requires_grad
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
             baseline = torch.zeros_like(x_captum)
-            y_batch = y_batch.to(device, non_blocking=True).long()
+            y_batch = y_batch.to(device, non_blocking=True)
+            #y_batch = y_batch.to(device, non_blocking=True).long()
+
+            
 
             # 6) --- forward pass and predict labels
-            outputs = model(x_captum)
+            with torch.no_grad():
+                outputs = model(x_captum)
             pred = outputs.argmax(dim=1)
+
+
+
             # 7) --- compute captum attributes
             if scoring_type == "Conductance_alt":
                 captum_out = mlc.attribute(
@@ -84,26 +97,43 @@ def calculate_scores(
                 attribute_to_layer_input=False,
                 grad_kwargs={"retain_graph": False},
             )
+                
             # 8) --- process captum output
             if isinstance(captum_out, list):
                 captum_attrs = [t.detach() for t in captum_out]
             elif isinstance(captum_out, tuple):
                 captum_attrs = tuple(t.detach() for t in captum_out)
             else:
-                captum_attrs = [captum_out.detach()]  
+                captum_attrs = [captum_out.detach()]
+
             # 9) --- accumulate scores
             for i, score in enumerate(captum_attrs):
                 #Sensetivity no batch dimension
-                if scoring_type == "Sensitivity":
-                    score_mean = score
-                #sum
-                elif sm:
+                #print(f"Layer {i} score shape before processing: {score.shape}")
+                if sm:
                     score_mean = score.sum(dim =0)
                 else:
                     score_mean = score.mean(dim=0)
-                if transformer and i % 4 != 0:
-                    score_mean = score_mean.mean(dim =0)
+                    #print(f"Layer {i} score after batch mean shape: {score_mean.shape}")
 
+                if mode == "cls" :#and (i % 4 != 0 or ypath):
+                    #print("Using cls mode")
+                    score_mean = score_mean[0]                      # [C]
+
+                elif mode == "mean": # and (i % 4 != 0 or ypath):
+
+                    score_mean = score_mean.mean(dim =0)             # [C]
+
+                elif mode == "sum" and (i % 4 != 0 or ypath):
+                    #print("Using sum mode")
+                    score_mean = score_mean.sum(dim =0)              # [C]
+
+                elif mode == "topk" and (i % 4 != 0 or ypath):
+                    topk_tokens = 10
+                    token_scores = score_mean.sum(dim=1)      # how strong each token is overall
+                    idx = token_scores.topk(topk_tokens).indices
+                    score_mean =  score_mean[idx].mean(dim=0)
+                #print(f"Layer {i} score shape after processing: {score_mean.shape}")
                 if i not in new_scores:
                     # First time: initialize with the computed score_mean
                     new_scores[i] = score_mean.clone()
@@ -111,9 +141,9 @@ def calculate_scores(
                     # Accumulate the score_mean
                     new_scores[i] += score_mean
     # 10) compute means for each layer
-    num_batches = len(list(batches))
+    #print(f"Processed {batch_count} batches for scoring.")
     for i in new_scores:
-        new_scores[i] /= num_batches
+        new_scores[i] /= batch_count
         #print(f"Layer {i} score shape: {new_scores[i].shape}")
 
     means = [s.mean() for s in new_scores.values() if s is not None]
@@ -148,13 +178,13 @@ def update_dropout_masks(
     for i, drop_layer in enumerate(drop_list):
         score = scores[i]
 
-        if alt_attention_cond and (i % 4 == 0):
-            N = score.shape[0]  # Number of tokens
-            qkv = score.reshape(N, 3, model.blocks[i // 4].attn.num_heads, model.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
-            q, k, v = qkv.unbind(0)
-            q, k = model.blocks[i // 4].attn.q_norm(q), model.blocks[i // 4].attn.k_norm(k)
-            q = q * model.blocks[i // 4].attn.scale
-            score = q @ k.transpose(-2, -1)
+        # if alt_attention_cond and (i % 4 == 0):
+        #     N = score.shape[0]  # Number of tokens
+        #     qkv = score.reshape(N, 3, model.blocks[i // 4].attn.num_heads, model.blocks[i // 4].attn.head_dim).permute(1, 2, 0, 3)
+        #     q, k, v = qkv.unbind(0)
+        #     q, k = model.blocks[i // 4].attn.q_norm(q), model.blocks[i // 4].attn.k_norm(k)
+        #     q = q * model.blocks[i // 4].attn.scale
+        #     score = q @ k.transpose(-2, -1)
 
             
         drop_layer.update_dropout_masks(score, stats=stats,noisy = noisy_dropout,min_dropout=min_dropout)

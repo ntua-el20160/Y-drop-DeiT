@@ -4,6 +4,7 @@
 # This source code is licensed under the CC-by-NC license found in the
 # LICENSE file in the root directory of this source tree.
 #
+from sklearn.preprocessing import scale
 import torch
 import torch.nn as nn
 from functools import partial
@@ -13,49 +14,103 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-
+import torch.nn.functional as F 
 
 from timm.models.vision_transformer import VisionTransformer, _cfg, LayerScale
 from timm.models import register_model
 from timm.layers import PatchEmbed,use_fused_attn,DropPath, trunc_normal_
+from updated_transformer.masks import (
+    winsorized_minmax_map,
+    robust_logistic_map,
+    rank_power_map,
+    isotonic_regression_map,
+    zscore_clamp_map,
+    rank_even_blend_map,
+    yeo_johnson_map,
+)
+
 
 
 """DropPath and LayerScale may need changes"""
+# def linear_compression(x, a, b, target_mean=None, eps=1e-10):
+#     # ensure a < b
+#     if not isinstance(a, torch.Tensor): a = torch.tensor(a, dtype=x.dtype, device=x.device)
+#     if not isinstance(b, torch.Tensor): b = torch.tensor(b, dtype=x.dtype, device=x.device)
+#     b = torch.maximum(b, a + torch.tensor(1e-6, dtype=x.dtype, device=x.device))
+
+#     mu = x.mean()
+#     # If you want a specific mean (e.g., base_keep), use it, otherwise use current mu
+#     mu = torch.tensor(target_mean, dtype=x.dtype, device=x.device) if (target_mean is not None) else mu
+#     # Project mu into (a, b) to avoid negative/undefined slopes
+#     mu = torch.clamp(mu, a + eps, b - eps)
+
+#     # slopes that map x=0 -> >= a and x=1 -> <= b
+#     alpha_lo = (mu - a) / (mu + eps)
+#     alpha_hi = (b - mu) / (1 - mu + eps)
+#     alpha = torch.minimum(alpha_lo, alpha_hi)
+#     alpha = torch.clamp(alpha, min=0.0)  # keep monotonic, avoid flipping
+
+#     y = mu + alpha * (x - mu)
+#     return torch.clamp(y, a, b)
 def linear_compression(x, a, b):
     μ = x.mean()
     α = torch.min((μ - a) / μ, (b - μ) / (1 - μ))
     return μ + α * (x - μ)
+def half_rank_scores(x: torch.Tensor, top_val: float = 0.6, bot_val: float = 0.1) -> torch.Tensor:
+    """
+    Given a 1D tensor x, return a tensor of same length where:
+      - the highest ceil(N/2) values get `top_val`
+      - the rest get `bot_val`
+    NaNs are treated as -inf for ranking (i.e., bottom group).
+    """
+    if x.ndim != 1:
+        raise ValueError("half_rank_scores expects a 1D tensor (vector).")
 
-def piecewise_linear(x, a, b):
-    μ = x.mean()
-    slope_lo = (μ - a) / μ
-    slope_hi = (b - μ) / (1 - μ)
-    return torch.where(
-        x <= μ,
-        a + slope_lo * x,
-        b - slope_hi * (1 - x)
-    )
+    n = x.numel()
+    if n == 0:
+        return x.new_empty(0)
 
-def find_gamma(x, a, b,tar = None ,tol=1e-4, max_iter=50):
-    if tar == None:
-        μ = x.mean().item()
-    else:
-        μ = tar
-    target = (μ - a) / (b - a)
-    lo, hi = 1e-3, 10.0
-    for _ in range(max_iter):
-        mid = (lo + hi) / 2
-        if torch.mean(x**mid).item() > target:
-            lo = mid
-        else:
-            hi = mid
-        if abs(torch.mean(x**mid).item() - target) < tol:
-            break
-    return mid
+    # Treat NaNs as -inf for sorting
+    vals = x.clone()
+    neg_inf = torch.tensor(float('-inf'), device=x.device, dtype=x.dtype)
+    vals = torch.where(torch.isnan(vals), neg_inf, vals)
 
-def power_law_rescale(x, a, b,tar = None):
-    γ = find_gamma(x=x, a=a, b=b,tar=tar)
-    return a + (b - a) * x.pow(γ)
+    # Sort descending, take top ceil(n/2)
+    idx_sorted = torch.argsort(vals, descending=True)
+    k = (n + 1) // 2  # ceil(n/2)
+
+    out_dtype = x.dtype if x.is_floating_point() else torch.float32
+    out = torch.full((n,), bot_val, device=x.device, dtype=out_dtype)
+    out[idx_sorted[:k]] = top_val
+    return out
+
+def project_to_capped_simplex(v, target_mean, lo=0.0, hi=1.0, iters=40):
+    # v: Tensor; we want y in [lo, hi] with mean == target_mean
+    N      = v.numel()
+    device = v.device
+    dtype  = v.dtype
+
+    lo_t = torch.as_tensor(lo, dtype=dtype, device=device)
+    hi_t = torch.as_tensor(hi, dtype=dtype, device=device)
+
+    # desired sum in the unit box
+    t = torch.as_tensor(target_mean, dtype=dtype, device=device) * N
+    t = torch.clamp(t, lo_t * N, hi_t * N)  # <-- tensor clamp
+
+    # bisection on tau for y = clamp(v - tau, lo, hi), s.t. sum(y) == t
+    tau_lo = (v - hi_t).min()
+    tau_hi = (v - lo_t).max()
+    for _ in range(iters):
+        tau = (tau_lo + tau_hi) * 0.5
+        y   = torch.clamp(v - tau, lo_t, hi_t)
+        s   = y.sum()
+        # keep it branchless to avoid CPU/GPU sync
+        gt  = (s > t).to(v.dtype)
+        tau_lo = gt * tau + (1 - gt) * tau_lo
+        tau_hi = (1 - gt) * tau + gt * tau_hi
+
+    return torch.clamp(v - (tau_lo + tau_hi) * 0.5, lo_t, hi_t)
+
 
 class MyDropout(nn.Module):
     def __init__(self,elasticity = 1.0,p=0.1,tied_layer: Optional[nn.Module] = None,scaler =1.0,
@@ -83,204 +138,76 @@ class MyDropout(nn.Module):
         self.mask_type = mask_type
         self.base = False
         self.base_keep = 1 - self.p
-        self.tied_layer = tied_layer  # Store the tied layer for reference.
-        self.transformer_mean = transformer_mean  # Whether to use the transformer mean for normalization.
-        self.rescaling_type = rescaling_type  # Type of rescaling to apply to the scoring values.
+        self.tied_layer = tied_layer
+        self.transformer_mean = transformer_mean
+        self.rescaling_type = rescaling_type
 
-        # Buffers will be lazily initialized based on the tied layer's output.
- 
+        # Lazily shaped buffers; keep them registered!
         self.register_buffer("previous", torch.empty(0))
-        self.register_buffer("scaling", torch.empty(0))
-        self.register_buffer("scoring", torch.empty(0))
-        self.beta = torch.tensor(0.0)
+        self.register_buffer("scaling",  torch.empty(0))
+        self.register_buffer("beta",     torch.tensor(0.0))  # logit(base_keep) set on first init
+        #self.beta = 0.5
         self.initialized = False
 
-        # Aggregated statistics for updating without keeping full history:
-        self.n_updates = 0  # Number of updates processed.
-        self.running_scoring_mean = None  # Running (per-neuron) average of scoring.
-        self.running_dropout_mean = None  # Running (per-neuron) average of keep probability.
-        
-        # Histograms (fixed 50 bins): cumulative counts for scoring and keep probability.
-        self.scoring_hist = np.zeros(100)  
-        self.keep_hist = np.zeros(100)
-        self.scoring_hist_focused = np.zeros(300)  # Focused histogram for scoring.
-        self.random_neurons = []  # Randomly selected neurons for histogram tracking.
 
-        self.random_neuron_hists_scoring = [np.zeros(100) for _ in range(4)]  # List of random neuron scoring histograms.
-        self.random_neuron_hists_keep = [np.zeros(100) for _ in range(4)]  # List of random neuron histograms.
         
-        # For progression statistics (one scalar per update).
-        self.sum_scoring = None  # Cumulative sum to compute overall average scoring.
-        self.sum_keep = None     # Cumulative sum to compute overall average keep probability.
-        self.progression_scoring = []  # List of overall average scoring per update.
-        self.progression_keep = []     # List of overall average keep probability per update.
-
     
     def initialize_buffers(self, feature_shape, device):
-        new_prev = torch.full(feature_shape, 1 - self.p, device=device)
-        new_scaling = torch.full(feature_shape, 1 - self.p, device=device)
-        new_scoring = torch.zeros(feature_shape, device=device)
+        dtype = None
+        try:
+            # forward() knows the input dtype; thread it in via a call-site arg if needed
+            # but since you're calling from forward, you can just grab input.dtype there
+            # and pass it here; simplest minimal change: store it on self before calling
+            dtype = self._last_input_dtype   # <-- set this in forward() below
+        except AttributeError:
+            dtype = torch.get_default_dtype()
+        new_prev = torch.full(feature_shape, 1 - self.p, device=device, dtype=dtype)
+        new_scaling = torch.full(feature_shape, 1 - self.p, device=device, dtype=dtype)
         new_beta = torch.log(torch.tensor(self.base_keep / (1 - self.base_keep),
                                             dtype=new_prev.dtype,
                                             device=device))
         # Update the registered buffers.
         self.previous = new_prev
         self.scaling = new_scaling
-        self.scoring = new_scoring
         self.beta = new_beta
         self.initialized = True
-        num_neurons = new_prev.numel()
-        flat_idxs = np.random.choice(
-            num_neurons, size=min(4, num_neurons), replace=False
-        )
-        self.random_neurons = [
-            tuple(np.unravel_index(i, new_prev.shape))
-            for i in flat_idxs
-        ]
-        self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
-        self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
-        
-
-
-
-        # self.random_neurons = np.random.choice(num_neurons, size=min(4, num_neurons), replace=False).tolist()
-        # self.random_neuron_hists_scoring = [np.zeros(100) for _ in self.random_neurons ]  # List of random neuron scoring histograms.
-        # self.random_neuron_hists_keep = [np.zeros(100) for _ in self.random_neurons]  # List of random neuron histograms.
-
-
-
+    
 
     def update_dropout_masks(self, scoring, stats=True,noisy = False,min_dropout = 0.0):    
-        """Update the dropout masks based on the scoring tensor.
-        scoring: a tensor of shape [channels] representing the scoring values.
-        stats: whether to save the scoring and dropout history.
-        Mask types:
-        -sigmoid:sigmoid around the dropout rate shifted by the scoring.
-        -sigmoid_mod: sigmoid with random noise on the final mask.
-        -softmax: softmax of the negative scoring multiplied by the number of channels and chosen dropout rate.
-        -softmax_renorm: softmax of the negative scoring multiplied by the number of channels and chosen dropout rate, renormalized to keep average near the set dropout rate.
-        -rank: rank of the scoring values, with a ramp from 1 to 0.
-        -inverse: inverse sigmoid for fine-tuning.
-        -dynamic_sigmoid: dynamic sigmoid based on the min and max of the scoring values.
-        """
-       
-        # Normalize scoring
 
-        #ormalized = (scoring - scoring.mean()) / scoring.std()
-        # epsilon = 1e-6
-        # s_min, s_max = scoring.min(), scoring.max()
-        # normalized = 2 * (scoring - s_min) / (s_max - s_min + epsilon) - 1
-        scoring_final = scoring
-        self.scoring.copy_(scoring_final)
+       # Normalize scoring
+
+        a = 0.5 #max dropout
+        b = 1.0 - min_dropout #min dropout
+
+        if self.mask_type.endswith("_inverse"):
+            scoring_final = scoring
+        elif self.mask_type.endswith("_abs"):
+            scoring_final = torch.abs(scoring)
+        else:
+            scoring_final = -scoring
         #Different mask types
-        if self.mask_type == "sigmoid":
-            # Original approach
-            scoring_final = -scoring_final
-            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
-            raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
-            #keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
-        
-        elif self.mask_type == "sigmoid_inverse":
-            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
-            # Example smaller slope + random noise
-            raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
-            #keep_prob = torch.clamp(keep_prob, min=0.3,max=0.95)
-        
-        
-        elif self.mask_type == "softmax":
-            # Make sure scoring is not huge in magnitude.
-            #print(f"Score in function {scoring_final}")
-            scoring_final = -scoring_final
 
-            epsilon = torch.finfo(scoring_final.dtype).eps
-            s_min, s_max = scoring_final.min(), scoring_final.max()
-            #print("Max - Min:",s_max -s_min)
-            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
-            #print("Normalized inside:",normalized)
-        
-            flat = normalized.view(-1)
-            softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring_final.shape)
-
-            #normalize for average dropout rate close to p
-            #keep_prob = power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout,self.base_keep)
-            raw_keep = probs * self.scaling.numel() * self.base_keep
-                 
-
-            #keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
-
-        elif self.mask_type == "softmax_inverse":
-            # Make sure scoring is not huge in magnitude.
-            
-            epsilon = torch.finfo(scoring_final.dtype).eps
-            s_min, s_max = scoring_final.min(), scoring_final.max()
-            #print("Max - Min:",s_max -s_min)
-            normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
-            #print("Normalized inside:",normalized)
-        
-            flat = normalized.view(-1)
-            softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring_final.shape)
-
-            #normalize for average dropout rate close to p
-            #keep_prob = power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout,self.base_keep)
-            raw_keep = probs * self.scaling.numel() * self.base_keep
-            #keep_prob = raw_keep.clamp(min=0.3, max=1.0)
-        elif self.mask_type == "softmax_absolute":
-            # Make sure scoring is not huge in magnitude.
-            epsilon = torch.finfo(scoring_final.dtype).eps
-            s_min, s_max = scoring_final.min(), scoring_final.max()
-            normalized = torch.abs(2 *self.scaler* (scoring_final - s_min) / (s_max - s_min + epsilon) - self.scaler)
-
-            flat = normalized.view(-1)
-            softmax_flat = torch.softmax(flat, dim=0)
-            probs = softmax_flat.view(scoring_final.shape)
-
-            #normalize for average dropout rate close to p
-            raw_keep = probs * self.scaling.numel() * self.base_keep
-            #keep_prob = raw_keep.clamp(min=0.3, max=)
-
-
+        if self.mask_type.startswith("winsor"):
+            keep_prob = winsorized_minmax_map(scoring_final, a, b, self.base_keep,lower_q=0.00,upper_q=1.0)
+        elif self.mask_type.startswith("robust_logistic"):
+            keep_prob = robust_logistic_map(scoring_final, a, b, self.base_keep)
+        elif self.mask_type.startswith("isotonic"):
+            keep_prob = isotonic_regression_map(scoring_final, a, b, self.base_keep)
+        elif self.mask_type.startswith("rank_power"):
+            keep_prob = rank_power_map(scoring_final, a, b, self.base_keep, gamma=1.0)
         else:
             # Fallback or default
-            normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
-            raw_keep = torch.sigmoid(self.beta - self.scaler * normalized)
-            #keep_prob = torch.clamp(keep_prob, min=0.3, max=1.0 - min_dropout)
-        if noisy:
-            noise = (torch.rand_like(raw_keep) - 0.5) * 2 * (1-raw_keep.abs())*0.2
-            mask = (torch.rand_like(raw_keep) < 0.3).float()
+            keep_prob = winsorized_minmax_map(scoring_final, a, b, self.base_keep, lower_q=0.00, upper_q=1.0)
 
-            raw_keep = raw_keep + (mask*noise)
-
-        #power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout)
-        raw_keep = raw_keep.clamp(0.0, 1.0)
-        #print(self.rescaling_type)
-
-
-        if self.rescaling_type == "linear":
-            keep_prob = linear_compression(raw_keep, 0.3, 1.0 - min_dropout)
-        elif self.rescaling_type == "piecewise":
-            keep_prob = piecewise_linear(raw_keep, 0.3, 1.0 - min_dropout)
-        elif self.rescaling_type == "power_law":
-            keep_prob = power_law_rescale(raw_keep, 0.3, 1.0 - min_dropout)
-        else:
-            keep_prob = raw_keep.clamp(min=0.3, max=1.0 - min_dropout)
+        keep_prob = keep_prob.clamp(min=0.0, max=1.0).to(self.previous.dtype)
 
         # Step 3: Update scaling buffer and stats if needed
         if self.scaling.numel() == 0 or self.scaling.shape != keep_prob.shape:
             self.scaling = torch.full_like(keep_prob, self.base_keep)
-   
+            self.previous.resize_as_(keep_prob).zero_()
 
 
-            
-
-        if stats:
-            self.update_aggregated_statistics(scoring, keep_prob)
-        # print("1",self.scaling.device)
-        # print("2",keep_prob.device)
-        # print("3",scoring_final.device)
-        # Momentum-like update
-        keep_prob.to(self.scaling.device)
         self.scaling = self.scaling * (1 - self.elasticity) + keep_prob * self.elasticity
         self.previous.copy_(keep_prob)
 
@@ -290,6 +217,7 @@ class MyDropout(nn.Module):
     def forward(self, input):
         
         if not self.initialized:
+            self._last_input_dtype = input.dtype
             if self.transformer_mean:
                 feature_shape =input.shape[2:] #Exclude batch dimension and patch dimension
             else:
@@ -301,11 +229,7 @@ class MyDropout(nn.Module):
         
         #Initialuze buffers if not done yet
         if self.base or self.previous is None:
-            mask = torch.empty_like(input).bernoulli_(self.base_keep)
-            #print("Neuron amount",mask.shape)
-            #print("Amount of zeroes in mask: ",torch.sum(mask == 0))
-
-            return mask * input / (self.base_keep)
+            return F.dropout(input, p=self.p, training=True)
         else:
             
             probs = self.previous  # shape: (x, y)
@@ -313,13 +237,12 @@ class MyDropout(nn.Module):
             # Expand to input shape
             expanded_probs = probs.expand_as(input)  # input shape: (b, x, y) or (b, p, x, y)
             expanded_scaling = self.scaling.expand_as(input)  # shape: (b, x, y) or (b, p, x, y)
-            # Sample from Bernoulli distribution
-            #mask = torch.bernoulli(expanded_probs)
-            # m1 = torch.bernoulli(probs)
-            # mask = m1.expand_as(input)  # Expand mask to match input shape
-            mask = torch.bernoulli(expanded_probs)
-            #return mask * input / (self.base_keep)  # Avoid division by zero with a small epsilon
-            return mask * input / (expanded_scaling + 1e-12)  # Avoid division by zero with a small epsilon
+            mask  = torch.bernoulli(expanded_probs.to(dtype=input.dtype))
+            denom = (expanded_scaling.to(dtype=input.dtype) + 1e-12)
+
+            return mask * input / denom
+            # mask = torch.bernoulli(expanded_probs)
+            # return mask * input / (expanded_scaling + 1e-12)  # Avoid division by zero with a small epsilon
 
     def switch(self):
         if self.mask_type == "softmax_inverse":
@@ -330,6 +253,7 @@ class MyDropout(nn.Module):
             self.mask_type = "sigmoid"
         elif self.mask_type == "sigmoid":
             self.mask_type = "sigmoid_inverse"
+
         if not self.initialized:
         # nothing to do until buffers are created
             return
@@ -419,3 +343,55 @@ def _switch_tensor(t: torch.Tensor) -> torch.Tensor:
     out[pos_asc] = vals_desc
 
     return out.view_as(t)   
+
+
+    # if self.mask_type == "sigmoid":
+    #     scoring_final = -scoring_final
+    #     normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
+    #     raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
+    
+    # elif self.mask_type == "sigmoid_inverse":
+    #     normalized = (scoring_final - scoring_final.mean()) / scoring_final.std()
+    #     raw_keep = torch.sigmoid(self.beta + self.scaler * normalized)
+    
+    
+    # elif self.mask_type == "softmax":
+
+    #     scoring_final = -scoring_final
+
+    #     epsilon = torch.finfo(scoring_final.dtype).eps
+    #     s_min, s_max = scoring_final.min(), scoring_final.max()
+    #     normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
+    
+    #     flat = normalized.view(-1)
+    #     softmax_flat = torch.softmax(flat, dim=0)
+    #     probs = softmax_flat.view(scoring_final.shape)
+
+
+    #     raw_keep = probs * self.scaling.numel() * self.base_keep
+                
+
+
+    # elif self.mask_type == "softmax_inverse":
+        
+    #     epsilon = torch.finfo(scoring_final.dtype).eps
+    #     s_min, s_max = scoring_final.min(), scoring_final.max()
+    #     normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
+    
+    #     flat = normalized.view(-1)
+    #     softmax_flat = torch.softmax(flat, dim=0)
+    #     probs = softmax_flat.view(scoring_final.shape)
+
+    #     raw_keep = probs * self.scaling.numel() * self.base_keep
+    # elif self.mask_type == "softmax_absolute":
+
+    #     epsilon = torch.finfo(scoring_final.dtype).eps
+    #     scoring_final = torch.abs(scoring_final)
+    #     s_min, s_max = scoring_final.min(), scoring_final.max()
+    #     normalized = 2 * (scoring_final - s_min) / (s_max - s_min + epsilon) - 1
+    
+    #     flat = normalized.view(-1)
+    #     softmax_flat = torch.softmax(flat, dim=0)
+    #     probs = softmax_flat.view(scoring_final.shape)
+
+    #     raw_keep = probs * self.scaling.numel() * self.base_keep
