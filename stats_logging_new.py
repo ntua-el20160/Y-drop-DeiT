@@ -274,7 +274,8 @@ def _plot_values_scatter(x: np.ndarray, out_png: str, title: str):
 
 def _plot_maxgap(x: np.ndarray, out_png: str, title: str):
     if x.size == 0: return
-    xs = np.sort(x)[::-1]
+    xs = np.sort(x)
+
     gaps = xs[0] - xs  # non-negative gap from max
     plt.figure()
     plt.plot(np.arange(xs.size), gaps)
@@ -339,11 +340,14 @@ def _overlay_maxgap_multi(arrays: List[np.ndarray],
 
     plt.figure()
     for a, lab in zip(arrays_f, labels_f):
-        v = np.sort(a.ravel())[::-1][:nmin]
-        gap = v - v[0]
+        # v = np.sort(a.ravel())[::-1][:nmin]
+        # gap = v - v[0]
+        v = np.sort(a.ravel())[:nmin]   
+        gap =  -v              
+                   
         plt.plot(idx, gap, label=lab)
-    plt.xlabel("Ranked neuron (0=max)")
-    plt.ylabel("Gap from max")
+    plt.xlabel("Ranked neuron (0=min)")
+    plt.ylabel("Loss conductance inversed")
     plt.title(title)
     if len(arrays_f) > 1:
         plt.legend()
@@ -432,9 +436,9 @@ def compare_runs_last_only(run_dirs: List[str],
             _plot_hist(arr, os.path.join(layer_dir, "hist_last.png"),
                        title=f"{layer} – Histogram (last {labels[0]}={per_run_epoch[0]})", bins=bins)
             _plot_values_scatter(arr, os.path.join(layer_dir, "scatter_last.png"),
-                                 title=f"{layer} – Value per neuron (last)")
+                                 title=f"{layer} – Value per neuron")
             _plot_maxgap(arr, os.path.join(layer_dir, "maxgap_last.png"),
-                         title=f"{layer} – Gap from max (last)")
+                         title=f"{layer} – Gap from min")
             s = _basic_stats(arr, cv_mode=cv_mode)
             last_log.append(
                 f"[{layer}] LAST  {labels[0]}@{per_run_epoch[0]}\n"
@@ -450,10 +454,10 @@ def compare_runs_last_only(run_dirs: List[str],
                                 bins=bins)
             _overlay_scatter_multi(arrays, labels,
                                    os.path.join(layer_dir, "overlay_scatter_last.png"),
-                                   title=f"{layer} – Value per neuron (last)")
+                                   title=f"{layer} – Value per neuron")
             _overlay_maxgap_multi(arrays, labels,
                                   os.path.join(layer_dir, "overlay_maxgap_last.png"),
-                                  title=f"{layer} – Gap from max (last)")
+                                  title=f"{layer} – Gap from min")
 
             # per-run basic stats
             for lab, arr, ep in zip(labels, arrays, per_run_epoch):

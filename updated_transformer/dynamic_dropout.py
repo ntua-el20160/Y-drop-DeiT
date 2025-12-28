@@ -173,11 +173,11 @@ class MyDropout(nn.Module):
         self.initialized = True
     
 
-    def update_dropout_masks(self, scoring, stats=True,noisy = False,min_dropout = 0.0):    
+    def update_dropout_masks(self, scoring, stats=True,noisy = False,min_dropout = 0.0,max_dropout = 0.5):    
 
        # Normalize scoring
 
-        a = 0.5 #max dropout
+        a = max_dropout #max dropout
         b = 1.0 - min_dropout #min dropout
 
         if self.mask_type.endswith("_inverse"):
@@ -217,11 +217,14 @@ class MyDropout(nn.Module):
     def forward(self, input):
         
         if not self.initialized:
+            print("Initializing MyDropout buffers...")
+            print("Input shape:", input.shape)
             self._last_input_dtype = input.dtype
             if self.transformer_mean:
                 feature_shape =input.shape[2:] #Exclude batch dimension and patch dimension
             else:
                 feature_shape = input.shape[1:]  # Exclude the batch dimension.
+            print("Feature shape for buffers:", feature_shape)
             self.initialize_buffers(feature_shape, input.device)
 
         if not self.training:

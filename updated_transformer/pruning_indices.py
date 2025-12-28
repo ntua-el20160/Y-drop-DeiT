@@ -32,12 +32,14 @@ def calculate_scores(
         selected_layers: Optional[List[int]] = None,
         sm = False,
         ypath = False,
-        no_attn = False) -> Dict[int, torch.Tensor]:
+        no_attn = False,
+        baseline = None) -> Dict[int, torch.Tensor]:
     # 1) --- ensure model is in eval mode and gradients are disabled
     model.eval()
     if selected_layers is  None:
         selected_layers = model.selected_layers
 
+    mean_of_tokens_initial_layers = getattr(model, 'mean_of_tokens_initial_layers', 0)
 
     # 2) --- save original requires_grad settings
     orig_reqs = []
@@ -64,7 +66,8 @@ def calculate_scores(
             # 5) --- ensure x is on the correct device and requires_grad
             x_captum = x.detach().clone().requires_grad_()
             x_captum = x_captum.to(device, non_blocking=True)
-            baseline = torch.zeros_like(x_captum)
+            if baseline is None:
+                baseline = torch.zeros_like(x_captum)
             y_batch = y_batch.to(device, non_blocking=True)
             #y_batch = y_batch.to(device, non_blocking=True).long()
 
@@ -116,15 +119,14 @@ def calculate_scores(
                     score_mean = score.mean(dim=0)
                     #print(f"Layer {i} score after batch mean shape: {score_mean.shape}")
 
-                if mode == "cls" :#and (i % 4 != 0 or ypath):
+                if mode == "mean" or(mean_of_tokens_initial_layers is not None and i < mean_of_tokens_initial_layers): # and (i % 4 != 0 or ypath):
+                    #print(f"Using mean mode for layer {i+1}")
+                    score_mean = score_mean.mean(dim =0)   
+                elif mode == "cls":#and (i % 4 != 0 or ypath):
                     #print("Using cls mode")
-                    score_mean = score_mean[0]                      # [C]
+                    score_mean = score_mean[0]                      # [C]       # [C]
 
-                elif mode == "mean": # and (i % 4 != 0 or ypath):
-
-                    score_mean = score_mean.mean(dim =0)             # [C]
-
-                elif mode == "sum" and (i % 4 != 0 or ypath):
+                elif mode == "sum": #and (i % 4 != 0 or ypath):
                     #print("Using sum mode")
                     score_mean = score_mean.sum(dim =0)              # [C]
 
@@ -133,6 +135,8 @@ def calculate_scores(
                     token_scores = score_mean.sum(dim=1)      # how strong each token is overall
                     idx = token_scores.topk(topk_tokens).indices
                     score_mean =  score_mean[idx].mean(dim=0)
+                elif mode == 'nothing':
+                    pass
                 #print(f"Layer {i} score shape after processing: {score_mean.shape}")
                 if i not in new_scores:
                     # First time: initialize with the computed score_mean
@@ -170,7 +174,8 @@ def update_dropout_masks(
     alt_attention_cond: bool = False,
     stats: bool = False,
     min_dropout: float = 0.0,
-    noisy_dropout: bool = False
+    noisy_dropout: bool = False,
+    max_dropout: float = 0.5
 ):
     if drop_list is None:
         drop_list = model.drop_list

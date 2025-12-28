@@ -74,7 +74,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     update_freq:int=1,update_batches:int =5, tracker =None, update_data_loader= None,
                     mode =None,scoring_type:str ="Conductance",help_par:int =1,
                     noisy_dropout = False,min_dropout = 0.0,alt_attention_cond = False,mask_type = "sigmoid"
-                    ,ypath = False,conductance_batch_size:int = 32,) -> dict:
+                    ,ypath = False,conductance_batch_size:int = 32,max_dropout = 0.5) -> dict:
     #added
    
     # TODO fix this for finetuning
@@ -132,7 +132,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 scores,_ = calculate_scores(
                     model.module if hasattr(model, 'module') else model,
                     next_batches, device, scoring_type=scoring_type, mode=mode,
-                    normalization=False, sm=False, selected_layers=selected_layers, ypath=ypath
+                    normalization=False, sm=False, selected_layers=selected_layers, ypath=ypath,
+                    baseline= None,
                 )
                 _ddp_avg_scores_(scores)
                 # print(("Scores:", [ (k, v.shape if isinstance(v, torch.Tensor) else v) for k,v in scores.items() ]))
@@ -140,16 +141,16 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 if do_log:
                     with torch.no_grad():
                         tracker_normal.update(scores)
-                        scores_min_max = {}
-                        for i, scor in scores.items():
-                            sf = -scor
-                            eps = torch.finfo(sf.dtype).eps
-                            s_min, s_max = sf.min(), sf.max()
-                            denom = s_max - s_min
-                            normalized = (2 * (sf - s_min) / (denom + eps) - 1) if torch.isfinite(denom) and (denom > 0) \
-                                        else torch.zeros_like(sf)
-                            scores_min_max[i] = normalized
-                        tracker_minmax.update(scores_min_max)
+                        # scores_min_max = {}
+                        # for i, scor in scores.items():
+                        #     sf = -scor
+                        #     eps = torch.finfo(sf.dtype).eps
+                        #     s_min, s_max = sf.min(), sf.max()
+                        #     denom = s_max - s_min
+                        #     normalized = (2 * (sf - s_min) / (denom + eps) - 1) if torch.isfinite(denom) and (denom > 0) \
+                        #                 else torch.zeros_like(sf)
+                        #     scores_min_max[i] = normalized
+                        # tracker_minmax.update(scores_min_max)
 
 
                 if do_update:
@@ -158,8 +159,14 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                         scores = scores, drop_list=None,
                         min_dropout=min_dropout, noisy_dropout=noisy_dropout,
                         stats=False, alt_attention_cond=alt_attention_cond,
+                        max_dropout=max_dropout,
                     )
-
+                if do_log and check:
+                    with torch.no_grad():
+                        drop_rates ={}
+                        for i, drop in enumerate(model.module.drop_list if hasattr(model, 'module') else model.drop_list):
+                            drop_rates[i] = drop.previous
+                        tracker_minmax.update(drop_rates)
                 # if _ddp_is_on():
                 #     dist.barrier()
             if mixup_fn is not None:

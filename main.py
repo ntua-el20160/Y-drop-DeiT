@@ -325,6 +325,8 @@ def get_args_parser():
                         help='Batch size for conductance calculation')
     parser.add_argument('--switch_epochs', type=int, default=None,
                         help='Number of steps to accumulate gradients for conductance')
+    parser.add_argument('--no_update_epochs', type=int, default=None,
+                    help='Number of steps to accumulate gradients for conductance')
     parser.add_argument('--epoch-gap', type=int, default=1,
                         help='Save tracker stats/logs every N epochs (also used by build_reports)')
     parser.add_argument('--use-wds', action='store_true', default=False,
@@ -337,6 +339,14 @@ def get_args_parser():
                         help='Glob for val shards (WebDataset)')
     parser.add_argument('--scaled_dropout', action='store_true', default=False,
                         help='Enable scaled dropout')
+    parser.add_argument('--after_relu', action='store_true', default=False,
+                        help='Apply dropout after ReLU activation')
+    parser.add_argument("--scaling_freq_epochs", type=int, default=None,
+                    help='Number of steps to accumulate gradients for conductance')
+    parser.add_argument("--normal_dropout_initial_blocks", type=int, default=None,
+                help='Number of steps to accumulate gradients for conductance')
+    parser.add_argument("--mean_of_tokens_initial_layers", type=int, default=None,
+                help='Number of steps to accumulate gradients for conductance')
     return parser
 
 
@@ -474,14 +484,22 @@ def main(args):
     )
     
     model.n_steps = args.n_steps
+    model.mean_of_tokens_initial_layers = args.mean_of_tokens_initial_layers
+    print("Number of steps for conductance:", model.n_steps)
+    print("Mean of tokens for initial layers:", model.mean_of_tokens_initial_layers)
 
-                    
 
 
     if args.ydrop:
         model.selected_layers = []
         model.drop_list = []
         for i, block in enumerate(model.blocks):
+            if args.normal_dropout_initial_blocks is not None and i < args.normal_dropout_initial_blocks:
+                block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+                block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
+                block.mlp.drop1 = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+                block.mlp.drop2 = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
+                continue
             block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
             block.attn.proj_drop = MyDropout(elasticity=args.elasticity, p=args.drop_rate, tied_layer=block.attn.proj, mask_type=args.mask_type, scaler=args.scaler,
                                 transformer_mean=True,rescaling_type=args.rescaling_type)
@@ -495,7 +513,10 @@ def main(args):
                 model.selected_layers.append(block.norm2)
             else:
                 model.selected_layers.append(block.attn.proj)
-            model.selected_layers.append(block.mlp.fc1)
+            if args.after_relu:
+                model.selected_layers.append(block.mlp.act)
+            else:
+                model.selected_layers.append(block.mlp.fc1)
 
             if i < len(model.blocks) - 1 and args.after_norm:
                 model.selected_layers.append(model.blocks[i+1].norm1)
@@ -505,6 +526,29 @@ def main(args):
             model.drop_list.append(block.attn.proj_drop)
             model.drop_list.append(block.mlp.drop1)
             model.drop_list.append(block.mlp.drop2)
+    elif args.stats:
+        model.selected_layers = []
+        for i, block in enumerate(model.blocks):
+            if args.after_norm:
+                model.selected_layers.append(block.norm2)
+            else:
+                model.selected_layers.append(block.attn.proj)
+                
+            if args.after_relu:
+                model.selected_layers.append(block.mlp.act)
+            else:
+                model.selected_layers.append(block.mlp.fc1)
+
+            if i < len(model.blocks) - 1 and args.after_norm:
+                model.selected_layers.append(model.blocks[i+1].norm1)
+            else:
+                model.selected_layers.append(block.mlp.fc2)
+            # model.drop_list.append(block.attn.attn_drop)
+            block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+            block.attn.proj_drop = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
+            block.mlp.drop1 = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
+            block.mlp.drop2 = torch.nn.Dropout(args.drop_rate)  # Disable projection dropout
+
     else:
         for i, block in enumerate(model.blocks):
             block.attn.attn_drop = torch.nn.Dropout(args.drop_rate)  # Disable attention dropout
@@ -523,6 +567,11 @@ def main(args):
                 block.attn.proj_drop = torch.nn.Dropout(0.0)  # Disable projection dropout
                 block.mlp.drop1 = torch.nn.Dropout(0.0)  # Disable attention dropout
                 block.mlp.drop2 = torch.nn.Dropout(0.0)  # Disable projection dropout
+            elif args.normal_dropout_initial_blocks is not None and i < args.normal_dropout_initial_blocks:
+                block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
+                block.attn.proj_drop = torch.nn.Dropout(rates[i])  # Disable projection dropout
+                block.mlp.drop1 = torch.nn.Dropout(rates[i])  # Disable attention dropout
+                block.mlp.drop2 = torch.nn.Dropout(rates[i])  # Disable projection dropout
             else:
                 block.attn.attn_drop = torch.nn.Dropout(rates[i])  # Disable attention dropout
                 block.attn.proj_drop = MyDropout(elasticity=args.elasticity, p=rates[i], tied_layer=block.attn.proj, mask_type=args.mask_type, scaler=args.scaler,
@@ -539,7 +588,10 @@ def main(args):
                     model.selected_layers.append(block.norm2)
                 else:
                     model.selected_layers.append(block.attn.proj)
-                model.selected_layers.append(block.mlp.fc1)
+                if args.after_relu:
+                    model.selected_layers.append(block.mlp.act)
+                else:
+                    model.selected_layers.append(block.mlp.fc1)
                 if i < len(model.blocks) - 1 and args.after_norm:
                     model.selected_layers.append(model.blocks[i+1].norm1)
                 else:
@@ -557,8 +609,6 @@ def main(args):
                 block.attn.proj_drop =  torch.nn.Dropout(rates[i])
                 block.mlp.drop1 = torch.nn.Dropout(rates[i])
                 block.mlp.drop2 = torch.nn.Dropout(rates[i])
-
-
 
     
     # for i, block in enumerate(model.blocks):
@@ -749,13 +799,16 @@ def main(args):
     alive = True            # your boolean that flips
     anchor_best = None      # best accuracy at the start of the current window
     anchor_epoch = None 
+    update_freq = args.update_freq
+
 
     for epoch in range(saved_epoch, args.epochs):
         save_this_epoch = args.stats and ((epoch % args.epoch_gap) == 0 or epoch == args.epochs - 1)
 
         if save_this_epoch:
             tracker.begin_epoch(epoch)
-            tracker_post_minmax.begin_epoch(epoch)
+            if args.ydrop:
+                tracker_post_minmax.begin_epoch(epoch)
         epoch_start_time = time.time()
 
         if not alive:
@@ -782,8 +835,11 @@ def main(args):
                         if isinstance(drop, MyDropout):
                             drop.use_ydrop()
             check = True
-
-
+        if args.no_update_epochs is not None and args.ydrop and epoch >= args.no_update_epochs:
+            check = False
+        active_ep  = epoch - args.annealing_factor
+        if args.scaling_freq_epochs is not None  and active_ep>0 and active_ep %args.scaling_freq_epochs==0:
+            update_freq+=1
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
@@ -801,7 +857,7 @@ def main(args):
             model_ema=model_ema,
             mixup_fn=mixup_fn,
             check=check,
-            update_freq=args.update_freq,
+            update_freq=update_freq,
             update_batches=args.update_batches,
             tracker=[tracker, tracker_post_minmax] if save_this_epoch else None,   # NEW
             scoring_type = args.scoring_type,
@@ -832,14 +888,15 @@ def main(args):
 
         if save_this_epoch:
             tracker.end_epoch()
-            tracker_post_minmax.end_epoch()
+            if args.ydrop:
+                tracker_post_minmax.end_epoch()
 
         if test_stats.get('acc1', 0) > best_acc:
             best_acc = test_stats.get('acc1', 0)
             best_epoch = epoch + 1
 
-        # if args.switch_epochs is not None and args.ydrop and epoch >= args.switch_epochs:
-        #     alive = False
+        if args.switch_epochs is not None and args.ydrop and epoch >= args.switch_epochs:
+            alive = False
         ema_state = get_state_dict(model_ema) if model_ema is not None else None
 
         checkpoint ={
